@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service'; 
-import { Server } from 'socket.io';
+import { Server, Socket } from 'socket.io';
 
 // 1. Definimos o que fica salvo na RAM do servidor
 interface GameState {

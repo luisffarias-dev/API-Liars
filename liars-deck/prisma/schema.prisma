@@ -12,16 +12,20 @@ enum Role {
 }
 
 model User {
-  id        String        @id @default(uuid())
-  email     String        @unique
-  password  String
-  nickname  String        @unique
-  role      Role          @default(PLAYER)
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
+  id            String        @id @default(uuid())
+  email         String        @unique
+  password      String
+  nickname      String        @unique
+  role          Role          @default(PLAYER)
   
-  // Relação: Um usuário pode estar em várias instâncias de MatchPlayer (histórico)
-  matches   MatchPlayer[] 
+  // ---> ADICIONE ESTES DOIS CAMPOS <---
+  wins          Int           @default(0)
+  matchesPlayed Int           @default(0)
+  
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  
+  matches       MatchPlayer[] 
 }
 
 // Definições de estados para controle de fluxo

@@ -4,6 +4,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config'; // Importe estes
 import { MatchGateway } from './match/match.gateway';
 import { MatchmakingService } from './matchmaking/matchmaking.service';
 import { PrismaModule } from '../prisma/prisma.module';
+import { GameService } from './game.service';
 
 @Module({
   imports: [
@@ -18,6 +19,6 @@ import { PrismaModule } from '../prisma/prisma.module';
       }),
     }),
   ],
-  providers: [MatchGateway, MatchmakingService],
+  providers: [MatchGateway, MatchmakingService, GameService],
 })
 export class MatchModule {}

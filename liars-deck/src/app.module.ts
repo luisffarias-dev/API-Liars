@@ -3,6 +3,7 @@ import { AuthModule } from './auth/auth.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ConfigModule } from '@nestjs/config';
 import { MatchModule } from './match/match.module';
+import { UserController } from './user/user.controller';
 
 @Module({
   imports: [
@@ -11,7 +12,7 @@ import { MatchModule } from './match/match.module';
     PrismaModule,
     MatchModule,
   ],
-  controllers: [], // Geralmente vazio no AppModule
+  controllers: [UserController], // Geralmente vazio no AppModule
   providers: [],   // Geralmente vazio no AppModule
 })
 export class AppModule {}

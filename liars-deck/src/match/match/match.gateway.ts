@@ -99,6 +99,32 @@ export class MatchGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
   }
 
+  @SubscribeMessage('challenge')
+  async handleChallenge(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { matchId: string }
+  ) {
+    const challengerId = client.data.userId;
+    console.log(`[Gateway] 🕵️ Jogador ${challengerId} apertou o botão de DUVIDAR!`);
+
+    try {
+      const result = await this.gameService.challengeMove(
+        data.matchId,
+        challengerId,
+        this.server
+      );
+
+      console.log(`[Gateway] 📊 Resultado do desafio:`, result);
+
+      if (!result.success) {
+        client.emit('error', { message: result.message });
+      }
+    } catch (error) {
+      console.error(`[Gateway] 💥 ERRO FATAL AO DUVIDAR:`, error.message);
+      client.emit('error', { message: 'Erro interno no servidor ao processar o desafio.' });
+    }
+  }
+
   @SubscribeMessage('play_penalty')
   async handlePenaltyDuel(
     @ConnectedSocket() client: Socket,

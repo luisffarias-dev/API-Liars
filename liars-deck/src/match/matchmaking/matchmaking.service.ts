@@ -53,9 +53,13 @@ export class MatchmakingService {
           }
         });
 
-        console.log(`[Matchmaking] ✅ Partida criada no banco com ID: ${match.id}`);
+        console.log(`[Matchmaking] ✅ Partida criada com ID: ${match.id}`);
         
-        // ---> É AQUI QUE O MATCHMAKING PASSA A BOLA PRO GAME SERVICE <---
+        // ---> A SOLUÇÃO ESTÁ NESTA LINHA AQUI <---
+        // Força todos os sockets que estavam na fila a entrarem na sala da partida oficial!
+        server.in(targetRoomId).socketsJoin(match.id);
+        
+        // Agora sim chamamos o GameService
         await this.gameService.initializeGame(match.id, roomPlayers, server);
 
         this.waitingRooms.delete(targetRoomId);

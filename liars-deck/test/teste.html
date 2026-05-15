@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Teste Liar's Bar Jokenpo</title>
+    <!-- Importa o Socket.io direto do CDN -->
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        body { font-family: Arial; padding: 20px; background: #222; color: #fff; }
+        input, button { padding: 10px; margin: 5px; border-radius: 5px; border: none; }
+        button { background: #e74c3c; color: white; cursor: pointer; font-weight: bold; }
+        button:hover { background: #c0392b; }
+        #console { background: #111; padding: 15px; height: 300px; overflow-y: scroll; font-family: monospace; color: #0f0; border: 1px solid #444; }
+    </style>
+</head>
+<body>
+    <h2>🤖 Painel de Teste - Liar's Jokenpo</h2>
+    
+    <input id="token" placeholder="Cole seu JWT Token aqui" style="width: 300px;">
+    <button onclick="conectar()">1. Conectar Socket</button>
+    <button onclick="buscarPartida()">2. Entrar na Fila</button>
+    
+    <hr style="border-color: #444;">
+
+    <input id="matchId" placeholder="ID da Partida (Preenche automático)" style="width: 300px;"><br>
+    <input id="cardReal" placeholder="Carta Real (ROCK, PAPER, SCISSORS, JOKER)">
+    <input id="cardBlefe" placeholder="Carta Blefe (O que você vai gritar)">
+    
+    <br>
+    <button onclick="jogarCarta()">3. Jogar Carta</button>
+    <button onclick="duvidar()" style="background: #f1c40f; color: black;">4. DUVIDAR! (Mentira)</button>
+
+    <h3>Logs do Servidor:</h3>
+    <div id="console"></div>
+
+    <script>
+        let socket;
+        
+        function log(msg, data = '') {
+            const painel = document.getElementById('console');
+            const dataString = typeof data === 'object' ? JSON.stringify(data) : data;
+            painel.innerHTML += `<p>> ${msg} ${dataString}</p>`;
+            painel.scrollTop = painel.scrollHeight; // Rola pro final
+        }
+
+        function conectar() {
+            const token = document.getElementById('token').value;
+            // Conecta enviando o token igual o seu Gateway exige
+            socket = io('http://localhost:3000', {
+                auth: { token: token }
+            });
+
+            // --- ESCUTANDO OS EVENTOS DO SERVIDOR ---
+            socket.on('connect', () => log('✅ Conectado ao Servidor!'));
+            socket.on('disconnect', () => log('❌ Desconectado.'));
+            socket.on('error', (err) => log('⚠️ ERRO:', err.message));
+            
+            socket.on('queue_update', (data) => log('⏳ Fila de Espera:', data.message));
+            
+            socket.on('game_ready', (data) => {
+                log('🎮 PARTIDA COMEÇOU!', data.message);
+                document.getElementById('matchId').value = data.matchId; // Preenche o input
+            });
+            
+            socket.on('your_hand', (data) => log('🃏 Recebi minhas cartas:', data.cards));
+            socket.on('turn_start', (data) => log('⏱️ TURNO INICIADO! Jogador da vez:', data.currentPlayerId));
+            socket.on('card_played', (data) => log('🃏 JOGADA NA MESA:', data.message));
+            socket.on('challenge_result', (data) => log('🚨 DESAFIO FINALIZADO:', data.message));
+            socket.on('start_penalty_duel', (data) => log('💀 DUELO DA MORTE INICIADO PARA:', data.loserId));
+        }
+
+        // --- ENVIANDO EVENTOS PARA O SERVIDOR ---
+        function buscarPartida() { socket.emit('find_match'); }
+        
+        function jogarCarta() {
+            socket.emit('play_card', {
+                matchId: document.getElementById('matchId').value,
+                cardPlayed: document.getElementById('cardReal').value,
+                claimedCard: document.getElementById('cardBlefe').value
+            });
+        }
+
+        function duvidar() {
+            alert('Enviando desafio para o servidor!'); // Adicione esta linha
+            socket.emit('challenge', { matchId: document.getElementById('matchId').value });
+        }
+    </script>
+</body>
+</html>

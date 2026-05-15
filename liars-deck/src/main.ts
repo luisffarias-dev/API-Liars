@@ -28,7 +28,11 @@ async function bootstrap() {
   SwaggerModule.setup('api', app, document);
 
   // 3. Habilita o CORS (Importante se você for conectar um front-end ou mobile depois)
-  app.enableCors();
+  app.enableCors({
+    origin: '*',
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    allowedHeaders: '*',
+  });
 
   // Inicia o servidor na porta 3000
   await app.listen(3000);

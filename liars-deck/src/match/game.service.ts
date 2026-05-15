@@ -6,6 +6,7 @@ import { Server, Socket } from 'socket.io';
 interface GameState {
   playerIds: string[];
   currentTurnIndex: number;
+  isPenaltyMode?: boolean; // ---> CORREÇÃO: Propriedade adicionada aqui <---
   // Guarda quem jogou a última carta e o que era para a mecânica de Blefe
   lastPlay?: {
     userId: string;
@@ -52,7 +53,8 @@ export class GameService {
     // 3. Salva o estado da partida em memória (RAM)
     this.activeGames.set(matchId, {
       playerIds: playerIds,
-      currentTurnIndex: 0 // O índice 0 é o primeiro jogador do array
+      currentTurnIndex: 0, // O índice 0 é o primeiro jogador do array
+      isPenaltyMode: false // Inicializa como false
     });
 
     // 4. Inicia o primeiro turno imediatamente após distribuir as cartas
@@ -94,6 +96,18 @@ export class GameService {
     const game = this.activeGames.get(matchId);
     if (!game) return { success: false, message: 'Partida não encontrada.' };
     
+    // ---> NOVA TRAVA DE SEGURANÇA AQUI <---
+    if (game.isPenaltyMode) {
+      return { success: false, message: 'Aguarde o duelo de punição terminar!' };
+    }
+
+    // Busca o status atual no banco como garantia adicional
+    const match = await this.prisma.match.findUnique({ where: { id: matchId } });
+    if (match && match.status === 'PENALTY') {
+      return { success: false, message: 'Aguarde o duelo de punição terminar!' };
+    }
+    // --------------------------------------
+
     const currentPlayerId = game.playerIds[game.currentTurnIndex];
     if (currentPlayerId !== userId) return { success: false, message: 'Não é a sua vez!' };
 
@@ -138,6 +152,10 @@ export class GameService {
     // Se quem jogou mentiu, ele perde. Se falou a verdade, quem duvidou perde.
     const loserId = isLiar ? targetId : challengerId;
 
+    // TRAVA NA MEMÓRIA (Instantâneo)
+    game.isPenaltyMode = true;
+    this.activeGames.set(matchId, game);
+
     // Atualiza o banco com os Status de penalidade
     await this.prisma.match.update({ where: { id: matchId }, data: { status: 'PENALTY' } });
     await this.prisma.matchPlayer.updateMany({ 
@@ -158,10 +176,6 @@ export class GameService {
         ? `🚨 PEGO NA MENTIRA! A carta era um(a) ${cardPlayed}.` 
         : `❌ ACUSAÇÃO FALSA! A carta realmente era um(a) ${claimedCard}.`
     });
-
-    // Limpa a última jogada
-    game.lastPlay = undefined;
-    this.activeGames.set(matchId, game);
 
     // Inicia o evento de punição para o perdedor da rodada
     server.to(matchId).emit('start_penalty_duel', { loserId: loserId });
@@ -280,6 +294,9 @@ export class GameService {
 
       const game = this.activeGames.get(matchId);
       if (game) {
+        // ---> LIBERA AS JOGADAS DE CARTA AQUI <---
+        game.isPenaltyMode = false; 
+        
         // Limpa a carta da mesa para o próximo round
         game.lastPlay = undefined;
         this.activeGames.set(matchId, game);

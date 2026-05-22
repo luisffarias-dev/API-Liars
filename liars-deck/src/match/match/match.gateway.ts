@@ -9,8 +9,8 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
-import { MatchmakingService } from '../matchmaking/matchmaking.service'; // Ajuste o caminho se necessário
-import { GameService } from '../game.service'; // Importando o GameService (ajuste o caminho se necessário)
+import { MatchmakingService } from '../matchmaking/matchmaking.service';
+import { GameService } from '../game.service'; 
 
 @WebSocketGateway({ cors: { origin: '*' } })
 export class MatchGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -19,7 +19,7 @@ export class MatchGateway implements OnGatewayConnection, OnGatewayDisconnect {
   constructor(
     private jwtService: JwtService,
     private matchmakingService: MatchmakingService,
-    private gameService: GameService // Injetando o nosso gerenciador de regras do jogo
+    private gameService: GameService 
   ) {}
 
   async handleConnection(client: Socket) {
@@ -39,8 +39,8 @@ export class MatchGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const payload = await this.jwtService.verifyAsync(token);
       client.data.userId = payload.sub;
       
-      // 3. IMPORTANTE: Coloca o jogador em uma "sala privada" com o próprio ID.
-      // Isso permite que o GameService envie as 13 cartas só para ele.
+      // 3. Coloca o jogador em uma "sala privada" com o próprio ID.
+      // Isso permite que o GameService envie as cartas só para ele.
       client.join(client.data.userId);
       
       console.log(`✅ Conectado: ${payload.email}`);
@@ -67,36 +67,28 @@ export class MatchGateway implements OnGatewayConnection, OnGatewayDisconnect {
     await this.matchmakingService.joinQueue(client, client.data.userId, this.server);
   }
 
-  // --- NOVA ROTA: JOGAR CARTA ---
+  // --- ROTA ATUALIZADA: JOGAR MÚLTIPLAS CARTAS ---
   @SubscribeMessage('play_card')
   async handlePlayCard(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { matchId: string; cardPlayed: string; claimedCard: string }
+    @MessageBody() data: { matchId: string; cardsPlayed: string[] } // Recebe um array de cartas
   ) {
     const userId = client.data.userId;
 
-    // 1. O GameService valida e processa a carta escolhida
+    // 1. O GameService valida e processa as cartas escolhidas
     const result = await this.gameService.processMove(
       data.matchId,
       userId,
-      data.cardPlayed,   // A carta que ele REALMENTE está jogando
-      data.claimedCard,  // A carta que ele DIZ estar jogando (o blefe)
+      data.cardsPlayed, 
       this.server
     );
 
-    // 2. Se houver erro (não é a vez dele, ou não tem a carta), avisa só ele
+    // 2. Se houver erro (não é a vez dele, ou não tem as cartas), avisa só ele.
+    // (Em caso de sucesso, o próprio GameService já notifica a mesa inteira)
     if (!result.success) {
-      client.emit('error', { message: result.message });
+      client.emit('error', { message: (result as any).message || 'Erro ao jogar a carta.' });
       return;
     }
-
-    // 3. Notifica a mesa inteira que uma jogada aconteceu.
-    // CIBERSEGURANÇA: Só mandamos o 'claimedCard'. A verdade fica no servidor!
-    this.server.to(data.matchId).emit('card_played', {
-      userId: userId,
-      claimedCard: data.claimedCard, 
-      message: `O jogador disse que colocou um(a) ${data.claimedCard} na mesa.`
-    });
   }
 
   @SubscribeMessage('challenge')
@@ -117,7 +109,7 @@ export class MatchGateway implements OnGatewayConnection, OnGatewayDisconnect {
       console.log(`[Gateway] 📊 Resultado do desafio:`, result);
 
       if (!result.success) {
-        client.emit('error', { message: result.message });
+        client.emit('error', { message: (result as any).message || 'Erro ao duvidar.' });
       }
     } catch (error) {
       console.error(`[Gateway] 💥 ERRO FATAL AO DUVIDAR:`, error.message);
@@ -141,7 +133,7 @@ export class MatchGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     if (!result.success) {
       // Se não for a vez dele de duelar ou passar algo errado
-      client.emit('error', { message: result.message });
+      client.emit('error', { message: (result as any).message || 'Erro no duelo.' });
     }
   }
 

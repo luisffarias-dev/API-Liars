@@ -6,12 +6,12 @@ import { Server, Socket } from 'socket.io';
 interface GameState {
   playerIds: string[];
   currentTurnIndex: number;
-  isPenaltyMode?: boolean; // ---> CORREÇÃO: Propriedade adicionada aqui <---
-  // Guarda quem jogou a última carta e o que era para a mecânica de Blefe
+  isPenaltyMode?: boolean;
+  roundCard: string; // ---> NOVA REGRA: A carta que a mesa exige nesta rodada
+  cardsOnTableCount: number; // ---> NOVA REGRA: Acumulador de cartas na mesa
   lastPlay?: {
     userId: string;
-    cardPlayed: string;
-    claimedCard: string;
+    cardsPlayed: string[]; // ---> NOVA REGRA: Array de cartas jogadas
   };
 }
 
@@ -45,6 +45,10 @@ export class GameService {
       }
     }
 
+    // Sorteia a Carta da Rodada Inicial (ROCK, PAPER ou SCISSORS)
+    const validCards = ['ROCK', 'PAPER', 'SCISSORS'];
+    const initialRoundCard = validCards[Math.floor(Math.random() * validCards.length)];
+
     server.to(matchId).emit('game_ready', { 
       message: 'As cartas foram distribuídas! O duelo começou.',
       matchId: matchId
@@ -53,11 +57,13 @@ export class GameService {
     // 3. Salva o estado da partida em memória (RAM)
     this.activeGames.set(matchId, {
       playerIds: playerIds,
-      currentTurnIndex: 0, // O índice 0 é o primeiro jogador do array
-      isPenaltyMode: false // Inicializa como false
+      currentTurnIndex: 0, 
+      isPenaltyMode: false,
+      roundCard: initialRoundCard,
+      cardsOnTableCount: 0
     });
 
-    // 4. Inicia o primeiro turno imediatamente após distribuir as cartas
+    // 4. Inicia o primeiro turno
     this.emitTurn(matchId, server);
   }
 
@@ -66,14 +72,15 @@ export class GameService {
     const game = this.activeGames.get(matchId);
     if (!game) return;
 
-    // Descobre quem é o jogador atual usando o índice
     const currentPlayerId = game.playerIds[game.currentTurnIndex];
 
-    console.log(`[Game] ⏳ Turno do jogador ${currentPlayerId} na partida ${matchId}`);
+    console.log(`[Game] ⏳ Turno de ${currentPlayerId} | Carta da Rodada: ${game.roundCard}`);
 
-    // Avisa a SALA INTEIRA de quem é a vez
+    // Avisa a SALA INTEIRA de quem é a vez, qual a carta da rodada e o volume da mesa
     server.to(matchId).emit('turn_start', {
       currentPlayerId: currentPlayerId,
+      roundCard: game.roundCard,
+      cardsOnTableCount: game.cardsOnTableCount,
       message: `É a vez do jogador!`
     });
   }
@@ -83,52 +90,99 @@ export class GameService {
     const game = this.activeGames.get(matchId);
     if (!game) return;
 
-    // Passa para o próximo índice. O operador '%' faz voltar pro 0 quando chegar no 4.
     game.currentTurnIndex = (game.currentTurnIndex + 1) % game.playerIds.length;
     
-    // Atualiza o estado e emite o novo turno
     this.activeGames.set(matchId, game);
     this.emitTurn(matchId, server);
   }
 
-  // --- Função para processar a jogada de uma carta ---
-  async processMove(matchId: string, userId: string, cardValue: string, claimedValue: string, server: Server) {
+  // --- Função para processar a jogada de múltiplas cartas ---
+  async processMove(matchId: string, userId: string, cardsPlayed: string[], server: Server) {
     const game = this.activeGames.get(matchId);
     if (!game) return { success: false, message: 'Partida não encontrada.' };
     
-    // ---> NOVA TRAVA DE SEGURANÇA AQUI <---
     if (game.isPenaltyMode) {
       return { success: false, message: 'Aguarde o duelo de punição terminar!' };
     }
 
-    // Busca o status atual no banco como garantia adicional
     const match = await this.prisma.match.findUnique({ where: { id: matchId } });
     if (match && match.status === 'PENALTY') {
       return { success: false, message: 'Aguarde o duelo de punição terminar!' };
     }
-    // --------------------------------------
 
     const currentPlayerId = game.playerIds[game.currentTurnIndex];
     if (currentPlayerId !== userId) return { success: false, message: 'Não é a sua vez!' };
 
-    const player = await this.prisma.matchPlayer.findFirst({ where: { matchId, userId } });
-    if (!player || !player.cards.includes(cardValue)) {
-      return { success: false, message: 'Você não possui esta carta na mão.' };
+    if (!cardsPlayed || cardsPlayed.length === 0) {
+      return { success: false, message: 'Você precisa jogar pelo menos uma carta!' };
     }
 
-    // Remove a carta da mão no banco
+    // --- REGRA DE ZERAR A MÃO ---
+    // Se o jogador anterior jogou sua última carta, ESTE jogador é OBRIGADO a duvidar.
+    // Se tentar jogar por cima, perde automaticamente.
+    if (game.lastPlay) {
+      const prevPlayer = await this.prisma.matchPlayer.findFirst({ where: { matchId, userId: game.lastPlay.userId } });
+      if (prevPlayer && prevPlayer.cards.length === 0) {
+        return this.forceLoseForNotChallenging(matchId, userId, game.lastPlay.userId, server);
+      }
+    }
+
+    const player = await this.prisma.matchPlayer.findFirst({ where: { matchId, userId } });
+    if (!player) return { success: false, message: 'Jogador não encontrado.' };
+
+    // Verifica se o jogador tem TODAS as cartas selecionadas
     const newHand = [...player.cards];
-    newHand.splice(newHand.indexOf(cardValue), 1);
+    for (const card of cardsPlayed) {
+      const index = newHand.indexOf(card);
+      if (index === -1) {
+        return { success: false, message: 'Você não possui essas cartas na mão.' };
+      }
+      newHand.splice(index, 1);
+    }
+
+    // Atualiza o banco com a nova mão (cartas removidas)
     await this.prisma.matchPlayer.updateMany({ where: { matchId, userId }, data: { cards: newHand } });
 
-    console.log(`[Game] Jogador ${userId} jogou oculto ${cardValue} (disse que era ${claimedValue})`);
+    console.log(`[Game] Jogador ${userId} jogou ${cardsPlayed.length} carta(s) alegando ser ${game.roundCard}`);
 
-    // Salva a jogada na memória antes de passar o turno para permitir o desafio
-    game.lastPlay = { userId, cardPlayed: cardValue, claimedCard: claimedValue };
+    // Atualiza a memória
+    game.cardsOnTableCount += cardsPlayed.length;
+    game.lastPlay = { userId, cardsPlayed };
     this.activeGames.set(matchId, game);
+
+    // Notifica a mesa sobre a jogada, passando quantas cartas o jogador ainda tem
+    server.to(matchId).emit('card_played', {
+      userId: userId,
+      count: cardsPlayed.length,
+      cardsLeft: newHand.length,
+      totalOnTable: game.cardsOnTableCount,
+      message: `Oponente colocou ${cardsPlayed.length} carta(s) na mesa.`
+    });
 
     // Passa o turno para o próximo jogador
     this.passTurn(matchId, server);
+    return { success: true };
+  }
+
+  // --- Função Auxiliar: Punição por não duvidar do oponente que zerou a mão ---
+  private async forceLoseForNotChallenging(matchId: string, loserId: string, winnerId: string, server: Server) {
+    const game = this.activeGames.get(matchId);
+    if (!game) return { success: false };
+
+    game.isPenaltyMode = true;
+    this.activeGames.set(matchId, game);
+
+    await this.prisma.match.update({ where: { id: matchId }, data: { status: 'PENALTY' } });
+    await this.prisma.matchPlayer.updateMany({ where: { matchId, userId: loserId }, data: { status: 'IN_PENALTY' } });
+    
+    server.to(matchId).emit('challenge_result', {
+      isLiar: false,
+      actualCards: [],
+      loserId: loserId,
+      message: `🚨 VOCÊ PERDEU! O oponente jogou todas as cartas e você não duvidou.`
+    });
+
+    server.to(matchId).emit('start_penalty_duel', { loserId: loserId });
     return { success: true };
   }
 
@@ -144,15 +198,16 @@ export class GameService {
       return { success: false, message: 'Você só pode duvidar no seu turno!' };
     }
 
-    const { userId: targetId, cardPlayed, claimedCard } = game.lastPlay;
+    const { userId: targetId, cardsPlayed } = game.lastPlay;
     
-    // LÓGICA DE DETECÇÃO DE MENTIRA: é mentira se a carta for diferente e NÃO for Coringa
-    const isLiar = cardPlayed !== claimedCard && cardPlayed !== 'JOKER';
+    // LÓGICA DE DETECÇÃO DE MENTIRA (Array):
+    // É mentira se ALGUMA carta jogada NÃO for a Carta da Rodada E NÃO for o Mímico (JOKER)
+    const isLiar = cardsPlayed.some(c => c !== game.roundCard && c !== 'JOKER');
 
     // Se quem jogou mentiu, ele perde. Se falou a verdade, quem duvidou perde.
     const loserId = isLiar ? targetId : challengerId;
 
-    // TRAVA NA MEMÓRIA (Instantâneo)
+    // Trava a mesa no modo punição
     game.isPenaltyMode = true;
     this.activeGames.set(matchId, game);
 
@@ -163,33 +218,33 @@ export class GameService {
       data: { status: 'IN_PENALTY' } 
     });
 
-    console.log(`[Game] Desafio na partida ${matchId}! Alvo mentiu? ${isLiar}. Perdedor: ${loserId}`);
+    console.log(`[Game] Desafio na partida ${matchId}! Mentira? ${isLiar}. Perdedor: ${loserId}`);
 
-    // Avisa a mesa inteira sobre o resultado dramático
+    // Avisa a mesa revelando as cartas reais
     server.to(matchId).emit('challenge_result', {
       challengerId: challengerId,
       targetId: targetId,
       isLiar: isLiar,
-      actualCard: cardPlayed,
+      actualCards: cardsPlayed, // Mostra o array real
       loserId: loserId,
       message: isLiar 
-        ? `🚨 PEGO NA MENTIRA! A carta era um(a) ${cardPlayed}.` 
-        : `❌ ACUSAÇÃO FALSA! A carta realmente era um(a) ${claimedCard}.`
+        ? `🚨 PEGO NA MENTIRA! As cartas reais eram: ${cardsPlayed.join(', ')}.` 
+        : `❌ ACUSAÇÃO FALSA! Eram realmente cartas de ${game.roundCard} ou Mímicos.`
     });
 
-    // Inicia o evento de punição para o perdedor da rodada
+    // Inicia o evento de punição para o perdedor
     server.to(matchId).emit('start_penalty_duel', { loserId: loserId });
 
     return { success: true };
   }
 
+  // --- Resolução do Jokenpô (Punição) ---
   async resolvePenaltyDuel(matchId: string, userId: string, playerChoice: string, server: Server) {
     const validChoices = ['ROCK', 'PAPER', 'SCISSORS'];
     if (!validChoices.includes(playerChoice)) {
       return { success: false, message: 'Escolha inválida. Use ROCK, PAPER ou SCISSORS.' };
     }
 
-    // Verifica se o jogador realmente está na berlinda (IN_PENALTY)
     const player = await this.prisma.matchPlayer.findFirst({
       where: { matchId, userId, status: 'IN_PENALTY' }
     });
@@ -198,53 +253,45 @@ export class GameService {
       return { success: false, message: 'Você não está em um duelo de punição.' };
     }
 
-    // A "Máquina" faz a sua jogada de forma aleatória
+    // Máquina escolhe
     const pcChoice = validChoices[Math.floor(Math.random() * validChoices.length)];
 
-    // Lógica do Jokenpo: Verifica se o jogador perdeu
     let isEliminated = false;
     if (playerChoice === pcChoice) {
-      // Empate: Sobrevive
       isEliminated = false; 
     } else if (
       (playerChoice === 'ROCK' && pcChoice === 'SCISSORS') ||
       (playerChoice === 'PAPER' && pcChoice === 'ROCK') ||
       (playerChoice === 'SCISSORS' && pcChoice === 'PAPER')
     ) {
-      // Vitória: Sobrevive
       isEliminated = false;
     } else {
-      // Derrota: Eliminado
       isEliminated = true;
     }
 
-    // Atualiza o banco de dados
     const newStatus = isEliminated ? 'ELIMINATED' : 'SAFE';
     await this.prisma.matchPlayer.updateMany({
       where: { matchId, userId },
       data: { status: newStatus }
     });
 
-    // Avisa a todos o que aconteceu na roleta
     server.to(matchId).emit('penalty_result', {
       userId,
       playerChoice,
       pcChoice,
       isEliminated,
       message: isEliminated 
-        ? `💀 FIM DA LINHA! O jogador escolheu ${playerChoice} e o PC escolheu ${pcChoice}. O jogador foi ELIMINADO!` 
-        : `🎉 POR POUCO! O jogador escolheu ${playerChoice} e o PC escolheu ${pcChoice}. O jogador sobreviveu!`
+        ? `💀 FIM DA LINHA! PC escolheu ${pcChoice}. O jogador foi ELIMINADO!` 
+        : `🎉 SOBREVIVEU! PC escolheu ${pcChoice}. Retornando ao jogo...`
     });
 
-    // 2. Checa se o jogo acabou ou se continua
     await this.checkGameOverOrContinue(matchId, server);
 
     return { success: true };
   }
 
-  // 2. Método Auxiliar: Verifica fim de jogo ou inicia o próximo round
+  // --- Verifica Fim de Jogo ou Continua (Nova Rodada) ---
   private async checkGameOverOrContinue(matchId: string, server: Server) {
-    // Busca todos os jogadores que ainda não foram eliminados
     const survivors = await this.prisma.matchPlayer.findMany({
       where: { matchId, status: { not: 'ELIMINATED' } }
     });
@@ -258,26 +305,21 @@ export class GameService {
         data: { status: 'FINISHED' } 
       });
 
-      // ---> NOVO: ATUALIZANDO O HISTÓRICO E RANKING <---
-      
-      // 1. Adiciona +1 partida jogada para TODOS os participantes da mesa
+      // Atualiza Ranking
       const allPlayers = await this.prisma.matchPlayer.findMany({ where: { matchId } });
       for (const p of allPlayers) {
         await this.prisma.user.update({
           where: { id: p.userId },
-          data: { matchesPlayed: { increment: 1 } } // Prisma faz a soma automática!
+          data: { matchesPlayed: { increment: 1 } }
         });
       }
 
-      // 2. Adiciona +1 vitória apenas para o Campeão
       if (winnerId) {
         await this.prisma.user.update({
           where: { id: winnerId },
           data: { wins: { increment: 1 } }
         });
       }
-      
-      // ---> FIM DA ATUALIZAÇÃO DO RANKING <---
 
       server.to(matchId).emit('game_over', { 
         winnerId: winnerId, 
@@ -286,7 +328,7 @@ export class GameService {
 
       this.activeGames.delete(matchId);
     } else  {
-      // O JOGO CONTINUA! Volta o status para PLAYING e passa o turno
+      // O JOGO CONTINUA! Nova Rodada.
       await this.prisma.match.update({ 
         where: { id: matchId }, 
         data: { status: 'PLAYING' } 
@@ -294,17 +336,21 @@ export class GameService {
 
       const game = this.activeGames.get(matchId);
       if (game) {
-        // ---> LIBERA AS JOGADAS DE CARTA AQUI <---
         game.isPenaltyMode = false; 
         
-        // Limpa a carta da mesa para o próximo round
+        // --- RESET DA MESA PARA A NOVA RODADA ---
         game.lastPlay = undefined;
+        game.cardsOnTableCount = 0;
+
+        // Sorteia a nova carta da vez
+        const validCards = ['ROCK', 'PAPER', 'SCISSORS'];
+        game.roundCard = validCards[Math.floor(Math.random() * validCards.length)];
+        
         this.activeGames.set(matchId, game);
         
-        // Passa o turno. Importante: Como alguém pode ter sido eliminado, 
-        // vamos rodar o passTurn até cair em alguém que está SAFE.
+        // Passa o turno até cair em alguém que está SAFE
         let nextPlayerIsEliminated = true;
-        let loops = 0; // Trava de segurança
+        let loops = 0; 
         
         while (nextPlayerIsEliminated && loops < 4) {
           game.currentTurnIndex = (game.currentTurnIndex + 1) % game.playerIds.length;
@@ -312,7 +358,7 @@ export class GameService {
           
           const checkStatus = survivors.find(s => s.userId === nextPlayerId);
           if (checkStatus) {
-            nextPlayerIsEliminated = false; // Achou alguém vivo!
+            nextPlayerIsEliminated = false;
           }
           loops++;
         }
@@ -333,7 +379,7 @@ export class GameService {
     return deck;
   }
 
-  // --- Embaralhamento Profissional (Fisher-Yates) ---
+  // --- Embaralhamento (Fisher-Yates) ---
   private shuffle(array: string[]): string[] {
     const newArray = [...array];
     for (let i = newArray.length - 1; i > 0; i--) {
@@ -342,15 +388,15 @@ export class GameService {
     }
     return newArray;
   }
-  // Tenta recuperar a partida se o jogador atualizou a página
+
+  // --- Recuperar a partida em caso de Reload/Queda rápida ---
   async recoverGameState(userId: string, client: Socket) {
-    
     if (this.disconnectTimeouts.has(userId)) {
       clearTimeout(this.disconnectTimeouts.get(userId));
       this.disconnectTimeouts.delete(userId);
       console.log(`[AFK] 🛑 Eliminação cancelada! Jogador ${userId} reconectou a tempo.`);
     }
-    // 1. Procura no banco se o jogador está em uma partida não finalizada
+
     const playerRecord = await this.prisma.matchPlayer.findFirst({
       where: { 
         userId: userId, 
@@ -366,38 +412,37 @@ export class GameService {
     const matchId = playerRecord.matchId;
     const game = this.activeGames.get(matchId);
 
-    // Se a partida estiver no banco mas não na RAM (ex: servidor reiniciou), encerramos ela por segurança
     if (!game) {
       await this.prisma.match.update({ where: { id: matchId }, data: { status: 'FINISHED' } });
       return { success: false, message: 'Partida expirou no servidor.' };
     }
 
-    // 2. Reconecta o Socket nas salas corretas
-    client.join(matchId); // Sala da partida
-    client.join(userId);  // Sala privada para receber cartas no futuro
+    client.join(matchId);
+    client.join(userId);
 
-    // 3. Monta o "Resumão" de como está a mesa agora
+    // Monta estado recuperado com suporte às novas regras
     const state = {
       matchId: matchId,
       matchStatus: playerRecord.match.status,
       myStatus: playerRecord.status,
       myCards: playerRecord.cards,
       currentTurnPlayerId: game.playerIds[game.currentTurnIndex],
+      roundCard: game.roundCard, // Envia a carta da rodada
+      cardsOnTableCount: game.cardsOnTableCount, // Envia as cartas empilhadas
       lastPlay: game.lastPlay ? {
         userId: game.lastPlay.userId,
-        claimedCard: game.lastPlay.claimedCard // Nunca envie a cardPlayed (real) para o cliente reconectado!
+        count: game.lastPlay.cardsPlayed.length // Envia só a contagem para evitar cheats
       } : null
     };
 
-    // 4. Envia para o jogador o estado atual
     client.emit('game_state_recovered', state);
     console.log(`[Reconexão] Jogador ${userId} voltou para a partida ${matchId}`);
 
     return { success: true };
   }
 
+  // --- Lidar com desconexões prolongadas ---
   async handlePlayerDisconnect(userId: string, server: Server) {
-    // 1. Verifica se o cara estava no meio de uma partida (e não apenas no menu)
     const player = await this.prisma.matchPlayer.findFirst({
       where: { 
         userId: userId, 
@@ -406,7 +451,7 @@ export class GameService {
       }
     });
 
-    if (!player) return; // Se não tava jogando, não faz nada
+    if (!player) return;
 
     const matchId = player.matchId;
     console.log(`[AFK] ⚠️ Jogador ${userId} caiu na partida ${matchId}. Iniciando timer de 30s...`);
@@ -416,30 +461,23 @@ export class GameService {
       message: 'Um oponente perdeu a conexão. Aguardando 30 segundos para retornar...'
     });
 
-    // 2. Inicia o cronômetro da morte
     const timeout = setTimeout(async () => {
       console.log(`[AFK] 💀 Tempo esgotado para ${userId}. Aplicando W.O.`);
 
-      // Elimina o jogador no banco
       await this.prisma.matchPlayer.updateMany({
         where: { matchId: matchId, userId: userId },
         data: { status: 'ELIMINATED' }
       });
 
-      // Avisa a mesa
       server.to(matchId).emit('player_eliminated_afk', {
         userId,
         message: 'Oponente eliminado por abandono de partida!'
       });
 
       this.disconnectTimeouts.delete(userId);
-
-      // Checa se sobrou só um vivo ou se passa o turno
       await this.checkGameOverOrContinue(matchId, server);
+    }, 30000);
 
-    }, 30000); // 30.000 milissegundos = 30 segundos
-
-    // Salva o cronômetro para poder cancelar se ele voltar
     this.disconnectTimeouts.set(userId, timeout);
   }
 }

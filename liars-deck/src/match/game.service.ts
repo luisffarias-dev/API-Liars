@@ -5,13 +5,14 @@ import { Server, Socket } from 'socket.io';
 // 1. Definimos o que fica salvo na RAM do servidor
 interface GameState {
   playerIds: string[];
+  playerNicknames: Record<string, string>; // Dicionário para salvar os nicknames em RAM (userId -> nickname)
   currentTurnIndex: number;
   isPenaltyMode?: boolean;
-  roundCard: string; // ---> NOVA REGRA: A carta que a mesa exige nesta rodada
-  cardsOnTableCount: number; // ---> NOVA REGRA: Acumulador de cartas na mesa
+  roundCard: string; // A carta que a mesa exige nesta rodada
+  cardsOnTableCount: number; // Acumulador de cartas na mesa
   lastPlay?: {
     userId: string;
-    cardsPlayed: string[]; // ---> NOVA REGRA: Array de cartas jogadas
+    cardsPlayed: string[]; // Array de cartas jogadas
   };
 }
 
@@ -25,6 +26,16 @@ export class GameService {
 
   async initializeGame(matchId: string, playerIds: string[], server: Server) {
     console.log(`[Game] 🃏 Iniciando distribuição para a partida ${matchId}`);
+
+    // --- BUSCA OS NICKNAMES DOS JOGADORES NO BANCO ---
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: playerIds } }
+    });
+    
+    const playerNicknames: Record<string, string> = {};
+    for (const u of users) {
+      playerNicknames[u.id] = u['nickname'] || u['name'] || 'Jogador';
+    }
 
     const deck = this.generateDeck();
     const shuffledDeck = this.shuffle(deck);
@@ -57,6 +68,7 @@ export class GameService {
     // 3. Salva o estado da partida em memória (RAM)
     this.activeGames.set(matchId, {
       playerIds: playerIds,
+      playerNicknames: playerNicknames, // Salva o dicionário de nicknames na RAM
       currentTurnIndex: 0, 
       isPenaltyMode: false,
       roundCard: initialRoundCard,
@@ -73,15 +85,17 @@ export class GameService {
     if (!game) return;
 
     const currentPlayerId = game.playerIds[game.currentTurnIndex];
+    const currentPlayerNickname = game.playerNicknames[currentPlayerId] || currentPlayerId;
 
-    console.log(`[Game] ⏳ Turno de ${currentPlayerId} | Carta da Rodada: ${game.roundCard}`);
+    console.log(`[Game] ⏳ Turno de ${currentPlayerNickname} (${currentPlayerId}) | Carta: ${game.roundCard}`);
 
     // Avisa a SALA INTEIRA de quem é a vez, qual a carta da rodada e o volume da mesa
     server.to(matchId).emit('turn_start', {
       currentPlayerId: currentPlayerId,
+      currentPlayerNickname: currentPlayerNickname, // Enviando o Nickname limpo para o Frontend
       roundCard: game.roundCard,
       cardsOnTableCount: game.cardsOnTableCount,
-      message: `É a vez do jogador!`
+      message: `É a vez de ${currentPlayerNickname}!`
     });
   }
 
@@ -118,8 +132,6 @@ export class GameService {
     }
 
     // --- REGRA DE ZERAR A MÃO ---
-    // Se o jogador anterior jogou sua última carta, ESTE jogador é OBRIGADO a duvidar.
-    // Se tentar jogar por cima, perde automaticamente.
     if (game.lastPlay) {
       const prevPlayer = await this.prisma.matchPlayer.findFirst({ where: { matchId, userId: game.lastPlay.userId } });
       if (prevPlayer && prevPlayer.cards.length === 0) {
@@ -143,20 +155,21 @@ export class GameService {
     // Atualiza o banco com a nova mão (cartas removidas)
     await this.prisma.matchPlayer.updateMany({ where: { matchId, userId }, data: { cards: newHand } });
 
-    console.log(`[Game] Jogador ${userId} jogou ${cardsPlayed.length} carta(s) alegando ser ${game.roundCard}`);
+    const playerNick = game.playerNicknames[userId] || 'Oponente';
+    console.log(`[Game] ${playerNick} jogou ${cardsPlayed.length} carta(s) alegando ser ${game.roundCard}`);
 
     // Atualiza a memória
     game.cardsOnTableCount += cardsPlayed.length;
     game.lastPlay = { userId, cardsPlayed };
     this.activeGames.set(matchId, game);
 
-    // Notifica a mesa sobre a jogada, passando quantas cartas o jogador ainda tem
+    // Notifica a mesa sobre a jogada
     server.to(matchId).emit('card_played', {
       userId: userId,
       count: cardsPlayed.length,
       cardsLeft: newHand.length,
       totalOnTable: game.cardsOnTableCount,
-      message: `Oponente colocou ${cardsPlayed.length} carta(s) na mesa.`
+      message: `${playerNick} colocou ${cardsPlayed.length} carta(s) na mesa.`
     });
 
     // Passa o turno para o próximo jogador
@@ -164,7 +177,7 @@ export class GameService {
     return { success: true };
   }
 
-  // --- Função Auxiliar: Punição por não duvidar do oponente que zerou a mão ---
+  // --- Função Auxiliar: Punição por não duvidar ---
   private async forceLoseForNotChallenging(matchId: string, loserId: string, winnerId: string, server: Server) {
     const game = this.activeGames.get(matchId);
     if (!game) return { success: false };
@@ -200,18 +213,12 @@ export class GameService {
 
     const { userId: targetId, cardsPlayed } = game.lastPlay;
     
-    // LÓGICA DE DETECÇÃO DE MENTIRA (Array):
-    // É mentira se ALGUMA carta jogada NÃO for a Carta da Rodada E NÃO for o Mímico (JOKER)
     const isLiar = cardsPlayed.some(c => c !== game.roundCard && c !== 'JOKER');
-
-    // Se quem jogou mentiu, ele perde. Se falou a verdade, quem duvidou perde.
     const loserId = isLiar ? targetId : challengerId;
 
-    // Trava a mesa no modo punição
     game.isPenaltyMode = true;
     this.activeGames.set(matchId, game);
 
-    // Atualiza o banco com os Status de penalidade
     await this.prisma.match.update({ where: { id: matchId }, data: { status: 'PENALTY' } });
     await this.prisma.matchPlayer.updateMany({ 
       where: { matchId: matchId, userId: loserId }, 
@@ -220,19 +227,17 @@ export class GameService {
 
     console.log(`[Game] Desafio na partida ${matchId}! Mentira? ${isLiar}. Perdedor: ${loserId}`);
 
-    // Avisa a mesa revelando as cartas reais
     server.to(matchId).emit('challenge_result', {
       challengerId: challengerId,
       targetId: targetId,
       isLiar: isLiar,
-      actualCards: cardsPlayed, // Mostra o array real
+      actualCards: cardsPlayed,
       loserId: loserId,
       message: isLiar 
         ? `🚨 PEGO NA MENTIRA! As cartas reais eram: ${cardsPlayed.join(', ')}.` 
         : `❌ ACUSAÇÃO FALSA! Eram realmente cartas de ${game.roundCard} ou Mímicos.`
     });
 
-    // Inicia o evento de punição para o perdedor
     server.to(matchId).emit('start_penalty_duel', { loserId: loserId });
 
     return { success: true };
@@ -253,7 +258,6 @@ export class GameService {
       return { success: false, message: 'Você não está em um duelo de punição.' };
     }
 
-    // Máquina escolhe
     const pcChoice = validChoices[Math.floor(Math.random() * validChoices.length)];
 
     let isEliminated = false;
@@ -275,17 +279,26 @@ export class GameService {
       data: { status: newStatus }
     });
 
+    const game = this.activeGames.get(matchId);
+    const playerNick = game?.playerNicknames[userId] || 'O jogador';
+
     server.to(matchId).emit('penalty_result', {
       userId,
       playerChoice,
       pcChoice,
       isEliminated,
       message: isEliminated 
-        ? `💀 FIM DA LINHA! PC escolheu ${pcChoice}. O jogador foi ELIMINADO!` 
+        ? `💀 FIM DA LINHA! PC escolheu ${pcChoice}. ${playerNick} foi ELIMINADO!` 
         : `🎉 SOBREVIVEU! PC escolheu ${pcChoice}. Retornando ao jogo...`
     });
 
     await this.checkGameOverOrContinue(matchId, server);
+
+    // ---> NOVO: DESCONECTA O JOGADOR DA SALA SE ELE FOI ELIMINADO <---
+    if (isEliminated) {
+      console.log(`[Game] 🥾 Expulsando jogador ${userId} da sala ${matchId} (Eliminado)`);
+      server.in(userId).socketsLeave(matchId);
+    }
 
     return { success: true };
   }
@@ -305,7 +318,6 @@ export class GameService {
         data: { status: 'FINISHED' } 
       });
 
-      // Atualiza Ranking
       const allPlayers = await this.prisma.matchPlayer.findMany({ where: { matchId } });
       for (const p of allPlayers) {
         await this.prisma.user.update({
@@ -321,45 +333,56 @@ export class GameService {
         });
       }
 
+      const game = this.activeGames.get(matchId);
+      const winnerNick = winnerId && game ? game.playerNicknames[winnerId] : null;
+
       server.to(matchId).emit('game_over', { 
         winnerId: winnerId, 
-        message: winnerId ? '🏆 Temos um grande campeão!' : '🤝 Empate/Todos eliminados.' 
+        message: winnerId ? `🏆 ${winnerNick} é o grande campeão!` : '🤝 Empate/Todos eliminados.' 
       });
 
       this.activeGames.delete(matchId);
-    } else  {
-      // O JOGO CONTINUA! Nova Rodada.
-      await this.prisma.match.update({ 
-        where: { id: matchId }, 
-        data: { status: 'PLAYING' } 
-      });
+    } else { 
+      await this.prisma.match.update({ where: { id: matchId }, data: { status: 'PLAYING' } });
 
       const game = this.activeGames.get(matchId);
       if (game) {
         game.isPenaltyMode = false; 
-        
-        // --- RESET DA MESA PARA A NOVA RODADA ---
         game.lastPlay = undefined;
         game.cardsOnTableCount = 0;
 
-        // Sorteia a nova carta da vez
         const validCards = ['ROCK', 'PAPER', 'SCISSORS'];
         game.roundCard = validCards[Math.floor(Math.random() * validCards.length)];
         
-        this.activeGames.set(matchId, game);
-        
-        // Passa o turno até cair em alguém que está SAFE
+        // ---> NOVO: REDISTRIBUIÇÃO DE CARTAS <---
+        const deck = this.generateDeck();
+        const shuffledDeck = this.shuffle(deck);
+
+        // Distribui apenas para quem ainda está vivo (survivors)
+        for (let i = 0; i < survivors.length; i++) {
+          const survivorId = survivors[i].userId;
+          const hand = shuffledDeck.slice(i * 13, (i + 1) * 13);
+          
+          await this.prisma.matchPlayer.updateMany({
+            where: { matchId: matchId, userId: survivorId },
+            data: { cards: hand }
+          });
+
+          // Envia o evento avisando o jogador específico da nova mão dele
+          server.to(survivorId).emit('new_round_cards', { 
+            myCards: hand,
+            opponentCardsLeft: 13 
+          });
+        }
+        // ---> FIM DA REDISTRIBUIÇÃO <---
+
         let nextPlayerIsEliminated = true;
         let loops = 0; 
         
         while (nextPlayerIsEliminated && loops < 4) {
           game.currentTurnIndex = (game.currentTurnIndex + 1) % game.playerIds.length;
           const nextPlayerId = game.playerIds[game.currentTurnIndex];
-          
-          const checkStatus = survivors.find(s => s.userId === nextPlayerId);
-          if (checkStatus) {
-            nextPlayerIsEliminated = false;
-          }
+          if (survivors.find(s => s.userId === nextPlayerId)) nextPlayerIsEliminated = false;
           loops++;
         }
         
@@ -368,6 +391,7 @@ export class GameService {
       }
     }
   }
+  
 
   // --- Geração do Baralho ---
   private generateDeck(): string[] {
@@ -420,18 +444,21 @@ export class GameService {
     client.join(matchId);
     client.join(userId);
 
-    // Monta estado recuperado com suporte às novas regras
+    const currentPlayerId = game.playerIds[game.currentTurnIndex];
+
+    // Monta estado recuperado
     const state = {
       matchId: matchId,
       matchStatus: playerRecord.match.status,
       myStatus: playerRecord.status,
       myCards: playerRecord.cards,
-      currentTurnPlayerId: game.playerIds[game.currentTurnIndex],
-      roundCard: game.roundCard, // Envia a carta da rodada
-      cardsOnTableCount: game.cardsOnTableCount, // Envia as cartas empilhadas
+      currentTurnPlayerId: currentPlayerId,
+      currentTurnPlayerNickname: game.playerNicknames[currentPlayerId], // Envia o nickname da vez
+      roundCard: game.roundCard, 
+      cardsOnTableCount: game.cardsOnTableCount,
       lastPlay: game.lastPlay ? {
         userId: game.lastPlay.userId,
-        count: game.lastPlay.cardsPlayed.length // Envia só a contagem para evitar cheats
+        count: game.lastPlay.cardsPlayed.length 
       } : null
     };
 
@@ -454,15 +481,18 @@ export class GameService {
     if (!player) return;
 
     const matchId = player.matchId;
-    console.log(`[AFK] ⚠️ Jogador ${userId} caiu na partida ${matchId}. Iniciando timer de 30s...`);
+    const game = this.activeGames.get(matchId);
+    const playerNick = game?.playerNicknames[userId] || 'Um jogador';
+
+    console.log(`[AFK] ⚠️ ${playerNick} caiu na partida ${matchId}. Iniciando timer de 30s...`);
     
     server.to(matchId).emit('player_disconnected', {
       userId,
-      message: 'Um oponente perdeu a conexão. Aguardando 30 segundos para retornar...'
+      message: `${playerNick} perdeu a conexão. Aguardando 30 segundos para retornar...`
     });
 
     const timeout = setTimeout(async () => {
-      console.log(`[AFK] 💀 Tempo esgotado para ${userId}. Aplicando W.O.`);
+      console.log(`[AFK] 💀 Tempo esgotado para ${playerNick}. Aplicando W.O.`);
 
       await this.prisma.matchPlayer.updateMany({
         where: { matchId: matchId, userId: userId },
@@ -471,7 +501,7 @@ export class GameService {
 
       server.to(matchId).emit('player_eliminated_afk', {
         userId,
-        message: 'Oponente eliminado por abandono de partida!'
+        message: `${playerNick} foi eliminado por abandono de partida!`
       });
 
       this.disconnectTimeouts.delete(userId);

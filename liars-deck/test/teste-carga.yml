@@ -1,0 +1,15 @@
+config:
+  target: "http://localhost:3000"
+  phases:
+    - duration: 30 # Roda o teste por 30 segundos
+      arrivalRate: 10 # Conecta 10 novos usuários por segundo
+  engines:
+    socketio: {}
+scenarios:
+  - name: "Entrar na fila"
+    engine: socketio
+    flow:
+      # Aqui você simularia o auth, mas supondo que conectou:
+      - emit:
+          channel: "find_match"
+      - think: 5 # Fica conectado esperando por 5 segundos

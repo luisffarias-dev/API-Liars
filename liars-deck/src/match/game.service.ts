@@ -259,18 +259,36 @@ export class GameService {
     }
 
     const pcChoice = validChoices[Math.floor(Math.random() * validChoices.length)];
+    const game = this.activeGames.get(matchId);
+    const playerNick = game?.playerNicknames[userId] || 'O jogador';
 
-    let isEliminated = false;
+    // ---> NOVA REGRA: TRATANDO O EMPATE <---
     if (playerChoice === pcChoice) {
-      isEliminated = false; 
-    } else if (
+      console.log(`[Game] ⚖️ Empate no Jokenpô! ${playerNick} e PC escolheram ${pcChoice}.`);
+      
+      server.to(matchId).emit('penalty_result', {
+        userId,
+        playerChoice,
+        pcChoice,
+        isEliminated: false,
+        isTie: true, // Avisa o front que foi empate
+        message: `⚖️ EMPATE! PC também escolheu ${pcChoice}. Jogue novamente!`
+      });
+      
+      // Retorna mais cedo. NÃO chama o checkGameOverOrContinue e não limpa a punição.
+      return { success: true };
+    }
+
+    // Se não foi empate, verifica quem ganhou
+    let isEliminated = false;
+    if (
       (playerChoice === 'ROCK' && pcChoice === 'SCISSORS') ||
       (playerChoice === 'PAPER' && pcChoice === 'ROCK') ||
       (playerChoice === 'SCISSORS' && pcChoice === 'PAPER')
     ) {
-      isEliminated = false;
+      isEliminated = false; // Jogador ganhou da máquina
     } else {
-      isEliminated = true;
+      isEliminated = true;  // Jogador perdeu da máquina
     }
 
     const newStatus = isEliminated ? 'ELIMINATED' : 'SAFE';
@@ -279,14 +297,12 @@ export class GameService {
       data: { status: newStatus }
     });
 
-    const game = this.activeGames.get(matchId);
-    const playerNick = game?.playerNicknames[userId] || 'O jogador';
-
     server.to(matchId).emit('penalty_result', {
       userId,
       playerChoice,
       pcChoice,
       isEliminated,
+      isTie: false,
       message: isEliminated 
         ? `💀 FIM DA LINHA! PC escolheu ${pcChoice}. ${playerNick} foi ELIMINADO!` 
         : `🎉 SOBREVIVEU! PC escolheu ${pcChoice}. Retornando ao jogo...`
@@ -294,7 +310,6 @@ export class GameService {
 
     await this.checkGameOverOrContinue(matchId, server);
 
-    // ---> NOVO: DESCONECTA O JOGADOR DA SALA SE ELE FOI ELIMINADO <---
     if (isEliminated) {
       console.log(`[Game] 🥾 Expulsando jogador ${userId} da sala ${matchId} (Eliminado)`);
       server.in(userId).socketsLeave(matchId);

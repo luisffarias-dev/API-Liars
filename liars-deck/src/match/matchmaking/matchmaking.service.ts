@@ -15,6 +15,32 @@ export class MatchmakingService {
   async joinQueue(client: Socket, userId: string, server: Server) {
     console.log(`[Queue] Tentativa de entrada: User ID ${userId}`);
 
+    // ==========================================
+    // 🛡️ TRAVA DE SEGURANÇA (ANTI-CLONE)
+    // ==========================================
+    const activeMatch = await this.prisma.matchPlayer.findFirst({
+      where: {
+        userId: userId,
+        status: { not: 'ELIMINATED' }, // O jogador NÃO foi eliminado
+        match: { status: { in: ['PLAYING', 'PENALTY'] } } // E a partida continua rolando
+      }
+    });
+
+    if (activeMatch) {
+      console.log(`[Queue] ⛔ Bloqueado: Jogador ${userId} tentou entrar na fila, mas já tem uma partida ativa.`);
+      
+      // Avisa o cliente do erro
+      client.emit('error', { 
+        message: 'Você já tem uma partida em andamento! Reconectando...' 
+      });
+      
+      // Força o front-end a pedir a reconexão para a sala antiga
+      client.emit('force_reconnect', { matchId: activeMatch.matchId });
+      
+      return; // 🛑 Para a execução aqui! Ele não entra na fila.
+    }
+    // ==========================================
+
     let targetRoomId: string | null = null;
 
     for (const [roomId, players] of this.waitingRooms.entries()) {

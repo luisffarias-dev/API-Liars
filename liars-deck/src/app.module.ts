@@ -4,6 +4,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { ConfigModule } from '@nestjs/config';
 import { MatchModule } from './match/match.module';
 import { UserController } from './user/user.controller';
+import { UserService } from './user/user.service';
 
 @Module({
   imports: [
@@ -13,7 +14,7 @@ import { UserController } from './user/user.controller';
     MatchModule,
   ],
   controllers: [UserController], // Geralmente vazio no AppModule
-  providers: [],   // Geralmente vazio no AppModule
+  providers: [UserService],   // Geralmente vazio no AppModule
 })
 export class AppModule {}
 

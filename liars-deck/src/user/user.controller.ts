@@ -1,30 +1,62 @@
-import { Controller, Get } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service'; // Ajuste o caminho
+import { Controller, Get, Patch, Request, UseGuards, UnauthorizedException, Body } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { UserService } from './user.service';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard'; // Ajuste o caminho do seu guard
+import { UserProfileResponseDto } from './dto/user-profile.dto'; // DTO que criamos no passo anterior
+import { UpdateAvatarDto } from './dto/update-avatar.dto'; // DTO que criamos no passo anterior
 
-@Controller('users')
+@ApiTags('User') // Agrupa as rotas no Swagger
+@Controller('user')
 export class UserController {
-  constructor(private prisma: PrismaService) {}
+  // CORREÇÃO AQUI: removido o "s" de usersService para userService
+  constructor(private readonly userService: UserService) {}
 
-  // ROTA: GET /users/ranking
   @Get('ranking')
+  @ApiOperation({ summary: 'Busca o top 10 jogadores com mais vitórias' })
+  @ApiResponse({ status: 200, description: 'Ranking retornado com sucesso.' })
   async getRanking() {
-    // Busca os 10 usuários com mais vitórias, em ordem decrescente
-    const topPlayers = await this.prisma.user.findMany({
-      orderBy: { wins: 'desc' },
-      take: 10,
-      select: {
-        nickname: true,
-        wins: true,
-        matchesPlayed: true,
-      }
-    });
+    // Agora vai funcionar perfeitamente
+    return this.userService.getRanking();
+  }
 
-    // Calcula a "Taxa de Vitória" (Winrate) pra ficar bonitão no Front-end
-    return topPlayers.map(player => ({
-      ...player,
-      winRate: player.matchesPlayed > 0 
-        ? ((player.wins / player.matchesPlayed) * 100).toFixed(1) + '%' 
-        : '0%'
-    }));
+  @Get('me')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Busca o perfil e estatísticas do usuário logado' })
+  @ApiResponse({ 
+    status: 200, 
+    description: 'Perfil retornado com sucesso.', 
+    type: UserProfileResponseDto 
+  })
+  @ApiResponse({ status: 401, description: 'Não autorizado.' })
+  async getProfile(@Request() req) {
+    // 1. Agora usamos o nome EXATO que a sua JwtStrategy exportou
+    const id = req.user.userId;
+
+    // 2. Trava de segurança extra (nunca mais teremos Erro 500 por causa disso)
+    if (!id) {
+      throw new UnauthorizedException('Token inválido: ID não mapeado na requisição.');
+    }
+
+    // 3. Busca no banco de dados
+    return this.userService.getProfile(id);
+  }
+
+
+ @Patch('me/avatar')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Atualiza o avatar do usuário logado' })
+  // ... ApiResponses ...
+  async updateAvatar(@Request() req, @Body() updateAvatarDto: UpdateAvatarDto) {
+    // 👇 ADICIONE ESTA LINHA DE DEBUG AQUI 👇
+    console.log('👀 Body do PATCH de avatar recebido:', updateAvatarDto);
+
+    const userId = req.user.userId;
+    if (!userId) {
+      throw new UnauthorizedException('Token inválido: ID não mapeado.');
+    }
+
+    return this.userService.updateAvatar(userId, updateAvatarDto.avatar);
   }
 }

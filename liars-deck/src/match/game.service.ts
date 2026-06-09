@@ -102,7 +102,8 @@ export class GameService {
   // --- Função para passar a vez ---
   passTurn(matchId: string, server: Server) {
     const game = this.activeGames.get(matchId);
-    if (!game) return;
+    // 👇 Proteção extra: se não houver jogadores válidos na RAM, aborta
+    if (!game || game.playerIds.length === 0) return; 
 
     game.currentTurnIndex = (game.currentTurnIndex + 1) % game.playerIds.length;
     
@@ -358,6 +359,7 @@ export class GameService {
 
       this.activeGames.delete(matchId);
     } else { 
+      // O JOGO CONTINUA - NOVA RODADA
       await this.prisma.match.update({ where: { id: matchId }, data: { status: 'PLAYING' } });
 
       const game = this.activeGames.get(matchId);
@@ -369,7 +371,16 @@ export class GameService {
         const validCards = ['ROCK', 'PAPER', 'SCISSORS'];
         game.roundCard = validCards[Math.floor(Math.random() * validCards.length)];
         
-        // ---> NOVO: REDISTRIBUIÇÃO DE CARTAS <---
+        // 👇 A MÁGICA ACONTECE AQUI: Atualiza a RAM removendo quem foi eliminado
+        const survivorIds = survivors.map(s => s.userId);
+        game.playerIds = game.playerIds.filter(id => survivorIds.includes(id));
+        
+        // Como o array de jogadores diminuiu, garantimos que o currentTurnIndex não estoure os limites
+        if (game.currentTurnIndex >= game.playerIds.length) {
+            game.currentTurnIndex = 0; 
+        }
+
+        // REDISTRIBUIÇÃO DE CARTAS
         const deck = this.generateDeck();
         const shuffledDeck = this.shuffle(deck);
 
@@ -389,17 +400,9 @@ export class GameService {
             opponentCardsLeft: 13 
           });
         }
-        // ---> FIM DA REDISTRIBUIÇÃO <---
 
-        let nextPlayerIsEliminated = true;
-        let loops = 0; 
-        
-        while (nextPlayerIsEliminated && loops < 4) {
-          game.currentTurnIndex = (game.currentTurnIndex + 1) % game.playerIds.length;
-          const nextPlayerId = game.playerIds[game.currentTurnIndex];
-          if (survivors.find(s => s.userId === nextPlayerId)) nextPlayerIsEliminated = false;
-          loops++;
-        }
+        // Passa o turno para o próximo vivo (baseado na nova lista limpa)
+        game.currentTurnIndex = (game.currentTurnIndex + 1) % game.playerIds.length;
         
         this.activeGames.set(matchId, game);
         this.emitTurn(matchId, server);
@@ -407,7 +410,6 @@ export class GameService {
     }
   }
   
-
   // --- Geração do Baralho ---
   private generateDeck(): string[] {
     const deck: string[] = [];

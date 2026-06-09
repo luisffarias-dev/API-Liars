@@ -5,29 +5,38 @@ import { Server, Socket } from 'socket.io';
 // 1. Definimos o que fica salvo na RAM do servidor
 interface GameState {
   playerIds: string[];
-  playerNicknames: Record<string, string>; // Dicionário para salvar os nicknames em RAM (userId -> nickname)
+  playerNicknames: Record<string, string>;
   currentTurnIndex: number;
   isPenaltyMode?: boolean;
-  roundCard: string; // A carta que a mesa exige nesta rodada
-  cardsOnTableCount: number; // Acumulador de cartas na mesa
+  roundCard: string;
+  cardsOnTableCount: number;
   lastPlay?: {
     userId: string;
-    cardsPlayed: string[]; // Array de cartas jogadas
+    cardsPlayed: string[];
   };
 }
 
 @Injectable()
 export class GameService {
-  // 2. O Map que segura a partida na memória
+  // 2. Os Maps que seguram a partida e os cronômetros na memória
   private activeGames: Map<string, GameState> = new Map();
   private disconnectTimeouts: Map<string, NodeJS.Timeout> = new Map();
+  // 👇 NOVO: Relógio da morte de 1 minuto para inatividade
+  private turnTimeouts: Map<string, NodeJS.Timeout> = new Map(); 
 
   constructor(private prisma: PrismaService) {}
+
+  // --- Função Auxiliar: Desarma a bomba de 1 minuto ---
+  private clearTurnTimeout(matchId: string) {
+    if (this.turnTimeouts.has(matchId)) {
+      clearTimeout(this.turnTimeouts.get(matchId));
+      this.turnTimeouts.delete(matchId);
+    }
+  }
 
   async initializeGame(matchId: string, playerIds: string[], server: Server) {
     console.log(`[Game] 🃏 Iniciando distribuição para a partida ${matchId}`);
 
-    // --- BUSCA OS NICKNAMES DOS JOGADORES NO BANCO ---
     const users = await this.prisma.user.findMany({
       where: { id: { in: playerIds } }
     });
@@ -56,7 +65,6 @@ export class GameService {
       }
     }
 
-    // Sorteia a Carta da Rodada Inicial (ROCK, PAPER ou SCISSORS)
     const validCards = ['ROCK', 'PAPER', 'SCISSORS'];
     const initialRoundCard = validCards[Math.floor(Math.random() * validCards.length)];
 
@@ -65,17 +73,15 @@ export class GameService {
       matchId: matchId
     });
 
-    // 3. Salva o estado da partida em memória (RAM)
     this.activeGames.set(matchId, {
       playerIds: playerIds,
-      playerNicknames: playerNicknames, // Salva o dicionário de nicknames na RAM
+      playerNicknames: playerNicknames,
       currentTurnIndex: 0, 
       isPenaltyMode: false,
       roundCard: initialRoundCard,
       cardsOnTableCount: 0
     });
 
-    // 4. Inicia o primeiro turno
     this.emitTurn(matchId, server);
   }
 
@@ -89,20 +95,54 @@ export class GameService {
 
     console.log(`[Game] ⏳ Turno de ${currentPlayerNickname} (${currentPlayerId}) | Carta: ${game.roundCard}`);
 
-    // Avisa a SALA INTEIRA de quem é a vez, qual a carta da rodada e o volume da mesa
     server.to(matchId).emit('turn_start', {
       currentPlayerId: currentPlayerId,
-      currentPlayerNickname: currentPlayerNickname, // Enviando o Nickname limpo para o Frontend
+      currentPlayerNickname: currentPlayerNickname,
       roundCard: game.roundCard,
       cardsOnTableCount: game.cardsOnTableCount,
       message: `É a vez de ${currentPlayerNickname}!`
     });
+
+    // 👇 NOVO: Limpa o timer velho e inicia a contagem de 60 segundos
+    this.clearTurnTimeout(matchId);
+    const timeout = setTimeout(() => {
+      this.handleTurnTimeout(matchId, currentPlayerId, server);
+    }, 60000); // 60 segundos = 1 minuto
+
+    this.turnTimeouts.set(matchId, timeout);
+  }
+
+  // --- 👇 NOVO: Função que elimina o jogador afk e reinicia a rodada ---
+  async handleTurnTimeout(matchId: string, afkPlayerId: string, server: Server) {
+    const game = this.activeGames.get(matchId);
+    if (!game) return;
+
+    // Se a partida mudou de vez muito rápido, aborta pra não bugar
+    if (game.playerIds[game.currentTurnIndex] !== afkPlayerId) return;
+
+    this.clearTurnTimeout(matchId);
+    const playerNick = game.playerNicknames[afkPlayerId] || 'Um jogador';
+    
+    console.log(`[TIMEOUT] ⏳ 1 minuto esgotado! ${playerNick} será eliminado da sala ${matchId}`);
+
+    // Elimina no banco de dados
+    await this.prisma.matchPlayer.updateMany({
+      where: { matchId: matchId, userId: afkPlayerId },
+      data: { status: 'ELIMINATED' },
+    });
+
+    server.to(matchId).emit('player_eliminated_afk', {
+      userId: afkPlayerId,
+      message: `💀 ${playerNick} demorou 1 minuto e foi ELIMINADO por inatividade! Iniciando nova rodada...`
+    });
+
+    // Aproveitamos a sua função que já sabe como limpar a mesa e iniciar nova rodada (ou finalizar se só sobrar 1)
+    await this.checkGameOverOrContinue(matchId, server);
   }
 
   // --- Função para passar a vez ---
   passTurn(matchId: string, server: Server) {
     const game = this.activeGames.get(matchId);
-    // 👇 Proteção extra: se não houver jogadores válidos na RAM, aborta
     if (!game || game.playerIds.length === 0) return; 
 
     game.currentTurnIndex = (game.currentTurnIndex + 1) % game.playerIds.length;
@@ -113,6 +153,9 @@ export class GameService {
 
   // --- Função para processar a jogada de múltiplas cartas ---
   async processMove(matchId: string, userId: string, cardsPlayed: string[], server: Server) {
+    // 👇 NOVO: O jogador agiu, desarma a bomba!
+    this.clearTurnTimeout(matchId);
+
     const game = this.activeGames.get(matchId);
     if (!game) return { success: false, message: 'Partida não encontrada.' };
     
@@ -132,7 +175,6 @@ export class GameService {
       return { success: false, message: 'Você precisa jogar pelo menos uma carta!' };
     }
 
-    // --- REGRA DE ZERAR A MÃO ---
     if (game.lastPlay) {
       const prevPlayer = await this.prisma.matchPlayer.findFirst({ where: { matchId, userId: game.lastPlay.userId } });
       if (prevPlayer && prevPlayer.cards.length === 0) {
@@ -143,7 +185,6 @@ export class GameService {
     const player = await this.prisma.matchPlayer.findFirst({ where: { matchId, userId } });
     if (!player) return { success: false, message: 'Jogador não encontrado.' };
 
-    // Verifica se o jogador tem TODAS as cartas selecionadas
     const newHand = [...player.cards];
     for (const card of cardsPlayed) {
       const index = newHand.indexOf(card);
@@ -153,18 +194,15 @@ export class GameService {
       newHand.splice(index, 1);
     }
 
-    // Atualiza o banco com a nova mão (cartas removidas)
     await this.prisma.matchPlayer.updateMany({ where: { matchId, userId }, data: { cards: newHand } });
 
     const playerNick = game.playerNicknames[userId] || 'Oponente';
     console.log(`[Game] ${playerNick} jogou ${cardsPlayed.length} carta(s) alegando ser ${game.roundCard}`);
 
-    // Atualiza a memória
     game.cardsOnTableCount += cardsPlayed.length;
     game.lastPlay = { userId, cardsPlayed };
     this.activeGames.set(matchId, game);
 
-    // Notifica a mesa sobre a jogada
     server.to(matchId).emit('card_played', {
       userId: userId,
       count: cardsPlayed.length,
@@ -173,7 +211,6 @@ export class GameService {
       message: `${playerNick} colocou ${cardsPlayed.length} carta(s) na mesa.`
     });
 
-    // Passa o turno para o próximo jogador
     this.passTurn(matchId, server);
     return { success: true };
   }
@@ -202,6 +239,9 @@ export class GameService {
 
   // --- Função do Desafio (DUVIDAR / MENTIRA) ---
   async challengeMove(matchId: string, challengerId: string, server: Server) {
+    // 👇 NOVO: O jogador agiu, desarma a bomba!
+    this.clearTurnTimeout(matchId);
+
     const game = this.activeGames.get(matchId);
     if (!game || !game.lastPlay) {
       return { success: false, message: 'Não há jogada anterior para duvidar.' };
@@ -263,7 +303,6 @@ export class GameService {
     const game = this.activeGames.get(matchId);
     const playerNick = game?.playerNicknames[userId] || 'O jogador';
 
-    // ---> NOVA REGRA: TRATANDO O EMPATE <---
     if (playerChoice === pcChoice) {
       console.log(`[Game] ⚖️ Empate no Jokenpô! ${playerNick} e PC escolheram ${pcChoice}.`);
       
@@ -272,24 +311,22 @@ export class GameService {
         playerChoice,
         pcChoice,
         isEliminated: false,
-        isTie: true, // Avisa o front que foi empate
+        isTie: true,
         message: `⚖️ EMPATE! PC também escolheu ${pcChoice}. Jogue novamente!`
       });
       
-      // Retorna mais cedo. NÃO chama o checkGameOverOrContinue e não limpa a punição.
       return { success: true };
     }
 
-    // Se não foi empate, verifica quem ganhou
     let isEliminated = false;
     if (
       (playerChoice === 'ROCK' && pcChoice === 'SCISSORS') ||
       (playerChoice === 'PAPER' && pcChoice === 'ROCK') ||
       (playerChoice === 'SCISSORS' && pcChoice === 'PAPER')
     ) {
-      isEliminated = false; // Jogador ganhou da máquina
+      isEliminated = false;
     } else {
-      isEliminated = true;  // Jogador perdeu da máquina
+      isEliminated = true;
     }
 
     const newStatus = isEliminated ? 'ELIMINATED' : 'SAFE';
@@ -326,7 +363,8 @@ export class GameService {
     });
 
     if (survivors.length <= 1) {
-      // TEMOS UM VENCEDOR!
+      this.clearTurnTimeout(matchId); // Garante que a bomba não exploda depois de acabar
+      
       const winnerId = survivors.length === 1 ? survivors[0].userId : null;
       
       await this.prisma.match.update({ 
@@ -371,20 +409,16 @@ export class GameService {
         const validCards = ['ROCK', 'PAPER', 'SCISSORS'];
         game.roundCard = validCards[Math.floor(Math.random() * validCards.length)];
         
-        // 👇 A MÁGICA ACONTECE AQUI: Atualiza a RAM removendo quem foi eliminado
         const survivorIds = survivors.map(s => s.userId);
         game.playerIds = game.playerIds.filter(id => survivorIds.includes(id));
         
-        // Como o array de jogadores diminuiu, garantimos que o currentTurnIndex não estoure os limites
         if (game.currentTurnIndex >= game.playerIds.length) {
             game.currentTurnIndex = 0; 
         }
 
-        // REDISTRIBUIÇÃO DE CARTAS
         const deck = this.generateDeck();
         const shuffledDeck = this.shuffle(deck);
 
-        // Distribui apenas para quem ainda está vivo (survivors)
         for (let i = 0; i < survivors.length; i++) {
           const survivorId = survivors[i].userId;
           const hand = shuffledDeck.slice(i * 13, (i + 1) * 13);
@@ -394,14 +428,13 @@ export class GameService {
             data: { cards: hand }
           });
 
-          // Envia o evento avisando o jogador específico da nova mão dele
           server.to(survivorId).emit('new_round_cards', { 
             myCards: hand,
             opponentCardsLeft: 13 
           });
         }
 
-        // Passa o turno para o próximo vivo (baseado na nova lista limpa)
+        // Passa o turno para o próximo vivo e chama o emitTurn (que vai disparar a contagem de 1 min de novo)
         game.currentTurnIndex = (game.currentTurnIndex + 1) % game.playerIds.length;
         
         this.activeGames.set(matchId, game);
@@ -420,7 +453,7 @@ export class GameService {
     return deck;
   }
 
-  // --- Embaralhamento (Fisher-Yates) ---
+  // --- Embaralhamento ---
   private shuffle(array: string[]): string[] {
     const newArray = [...array];
     for (let i = newArray.length - 1; i > 0; i--) {
@@ -430,7 +463,7 @@ export class GameService {
     return newArray;
   }
 
-  // --- Recuperar a partida em caso de Reload/Queda rápida ---
+  // --- Recuperar a partida ---
   async recoverGameState(userId: string, client: Socket) {
     if (this.disconnectTimeouts.has(userId)) {
       clearTimeout(this.disconnectTimeouts.get(userId));
@@ -441,7 +474,8 @@ export class GameService {
     const playerRecord = await this.prisma.matchPlayer.findFirst({
       where: { 
         userId: userId, 
-        match: { status: { in: ['PLAYING', 'PENALTY'] } } 
+        match: { status: { in: ['PLAYING', 'PENALTY'] } },
+        status: { not: 'ELIMINATED' } // 👇 CORREÇÃO: Impede sala zumbi pra quem já perdeu!
       },
       include: { match: true }
     });
@@ -463,14 +497,13 @@ export class GameService {
 
     const currentPlayerId = game.playerIds[game.currentTurnIndex];
 
-    // Monta estado recuperado
     const state = {
       matchId: matchId,
       matchStatus: playerRecord.match.status,
       myStatus: playerRecord.status,
       myCards: playerRecord.cards,
       currentTurnPlayerId: currentPlayerId,
-      currentTurnPlayerNickname: game.playerNicknames[currentPlayerId], // Envia o nickname da vez
+      currentTurnPlayerNickname: game.playerNicknames[currentPlayerId],
       roundCard: game.roundCard, 
       cardsOnTableCount: game.cardsOnTableCount,
       lastPlay: game.lastPlay ? {

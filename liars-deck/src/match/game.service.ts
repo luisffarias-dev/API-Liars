@@ -560,4 +560,42 @@ export class GameService {
 
     this.disconnectTimeouts.set(userId, timeout);
   }
+
+
+  async surrenderMatch(matchId: string, userId: string, server: Server) {
+    const game = this.activeGames.get(matchId);
+    if (!game) return;
+
+    const playerNick = game.playerNicknames[userId] || 'Um jogador';
+    console.log(`[Quit] 🏳️ ${playerNick} abandonou a partida ${matchId} voluntariamente.`);
+
+    // 1. Limpa os temporizadores (Desarma a bomba de AFK e de turno dele)
+    if (this.disconnectTimeouts.has(userId)) {
+      clearTimeout(this.disconnectTimeouts.get(userId));
+      this.disconnectTimeouts.delete(userId);
+    }
+    
+    // Se era o turno dele, limpa o timer de 1 minuto
+    if (game.playerIds[game.currentTurnIndex] === userId) {
+        this.clearTurnTimeout(matchId);
+    }
+
+    // 2. Atualiza o banco para ELIMINATED instantaneamente
+    await this.prisma.matchPlayer.updateMany({
+      where: { matchId: matchId, userId: userId },
+      data: { status: 'ELIMINATED' }
+    });
+
+    // 3. Avisa a mesa do abandono
+    server.to(matchId).emit('player_surrendered', {
+      userId: userId,
+      message: `🏳️ ${playerNick} arregou e abandonou a partida!`
+    });
+
+    // 4. Força a saída do socket da sala (se ele ainda estiver conectado por algum bug)
+    server.in(userId).socketsLeave(matchId);
+
+    // 5. Aciona o fim de jogo ou a passagem de turno limpa
+    await this.checkGameOverOrContinue(matchId, server);
+  }
 }

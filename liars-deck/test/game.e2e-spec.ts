@@ -3,13 +3,15 @@ dotenv.config();
 
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
-import * as request from 'supertest';
+const request = require('supertest');
 import { io, Socket } from 'socket.io-client';
 import { AppModule } from './../src/app.module';
+import { GameService } from './../src/match/game.service';
 
 describe('Matchmaking e Game (e2e)', () => {
   let app: INestApplication;
   let serverUrl: string;
+  let gameService: GameService;
   
   // Nossos 4 bots
   let p1: Socket, p2: Socket, p3: Socket, p4: Socket;
@@ -23,6 +25,8 @@ describe('Matchmaking e Game (e2e)', () => {
     app = moduleFixture.createNestApplication();
     await app.listen(0); 
     serverUrl = await app.getUrl();
+
+    gameService = app.get(GameService);
 
     if (!process.env.TEST_USER4_EMAIL) {
       throw new Error('As 4 variáveis de teste não foram encontradas no .env!');
@@ -41,10 +45,24 @@ describe('Matchmaking e Game (e2e)', () => {
   });
 
   afterAll(async () => {
+    // 1. Limpa todos os temporizadores de desconexão que estiverem rodando
+    // Acessamos a variável privada apenas para testes (uma gambiarra justificada)
+    const timeoutsMap = (gameService as any).disconnectTimeouts;
+    for (const [key, timeout] of timeoutsMap.entries()) {
+        clearTimeout(timeout);
+    }
+    timeoutsMap.clear();
+
+    // 2. Desconecta os sockets tranquilamente
     if (p1) p1.disconnect();
     if (p2) p2.disconnect();
     if (p3) p3.disconnect();
     if (p4) p4.disconnect();
+
+    // 3. Dá um respiro para o Prisma terminar eventuais transações pendentes
+    await new Promise(resolve => setTimeout(resolve, 500)); 
+
+    // 4. Fecha a aplicação do NestJS (encerra o pool de conexões do Prisma)
     await app.close();
   });
 

@@ -22,7 +22,7 @@ function criarBot(email, senha) {
 }
 
 // Cria 4 bots de uma vez
-criarBot('bot1@teste.com', '123');
-criarBot('bot2@teste.com', '123');
-criarBot('bot3@teste.com', '123');
-criarBot('bot4@teste.com', '123');
+criarBot('bot1@teste.com', '123456');
+criarBot('bot2@teste.com', '123456');
+criarBot('bot3@teste.com', '123456');
+criarBot('bot4@teste.com', '123456');

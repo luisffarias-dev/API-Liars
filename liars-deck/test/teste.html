@@ -18,6 +18,7 @@
         .success:hover { background: #27ae60; }
         .purple { background: #9b59b6; }
         .purple:hover { background: #8e44ad; }
+        
         #console { background: #111; padding: 15px; height: 250px; overflow-y: scroll; font-family: monospace; color: #0f0; border: 1px solid #444; }
         .panel { background: #333; padding: 15px; border-radius: 8px; margin-bottom: 15px; }
         
@@ -45,6 +46,14 @@
             margin-bottom: 15px;
             transition: 0.3s background;
         }
+        
+        /* Fila de espera pisca e mostra destaque */
+        .queue-status {
+            color: #f39c12;
+            font-weight: bold;
+            display: inline-block;
+            margin-left: 15px;
+        }
     </style>
 </head>
 <body>
@@ -62,8 +71,11 @@
     </div>
 
     <div class="panel">
-        <button onclick="buscarPartida()" class="success">🔍 Entrar na Fila de Partida</button>
+        <button onclick="buscarPartida()" class="success">🔍 Entrar na Fila</button>
+        <span id="queueText" class="queue-status">Fora da fila</span>
+        <br><br>
         <input id="matchId" placeholder="ID da Partida (Preenche automático)" style="width: 300px;" readonly>
+        <button onclick="desistir()" class="danger" style="margin-left: 15px;">🏳️ Arregar / Sair</button>
     </div>
 
     <div class="panel">
@@ -74,8 +86,8 @@
             <i>Aguardando cartas do servidor...</i>
         </div>
         
-        <button id="btnPlay" onclick="jogarCarta()" disabled>Jogar Carta(s) Selecionada(s)</button>
-        <button id="btnDuvidar" onclick="duvidar()" class="warning" disabled>DUVIDAR! (Mentira)</button>
+        <button id="btnPlay" onclick="jogarCarta()" disabled>Jogar Carta(s)</button>
+        <button id="btnDuvidar" onclick="duvidar()" class="warning" disabled>DUVIDAR!</button>
     </div>
 
     <div class="panel" style="border-left: 5px solid #e74c3c;">
@@ -91,8 +103,8 @@
     <script>
         let socket;
         let myCards = []; 
-        let myUserId = ''; // Guardará o ID deste HTML
-        let isMyTurn = false; // Controle de bloqueio
+        let myUserId = ''; 
+        let isMyTurn = false; 
         
         function log(msg, data = '') {
             const painel = document.getElementById('console');
@@ -101,7 +113,6 @@
             painel.scrollTop = painel.scrollHeight;
         }
 
-        // --- FUNÇÃO PARA DESCOBRIR SEU PRÓPRIO ID LENDO O TOKEN ---
         function extrairUserIdDoToken(token) {
             try {
                 const base64Url = token.split('.')[1];
@@ -110,9 +121,9 @@
                     '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)
                 ).join(''));
                 const payload = JSON.parse(jsonPayload);
-                return payload.sub; // No NestJS JWT, o 'sub' geralmente guarda o ID do usuário
+                return payload.sub; 
             } catch (e) {
-                log('⚠️ Erro ao ler Token JWT. Talvez o ID da vez não sincronize.');
+                log('⚠️ Erro ao ler Token JWT.');
                 return '';
             }
         }
@@ -123,7 +134,7 @@
             log(`⏳ Tentando fazer login com ${email}...`);
 
             try {
-                const response = await fetch('https://api-liars.onrender.com/auth/login', {
+                const response = await fetch('https://api-liars.onrender.com/auth/login', { // Ajuste para sua URL se não for localhost
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ email, password })
@@ -148,7 +159,7 @@
             container.innerHTML = ''; 
             
             if (myCards.length === 0) {
-                container.innerHTML = '<i style="color: #888;">Você não tem mais cartas!</i>';
+                container.innerHTML = '<i style="color: #888;">Mão vazia.</i>';
                 return;
             }
 
@@ -167,18 +178,32 @@
             const token = document.getElementById('token').value;
             if (!token) return alert('Token vazio!');
 
-            // Extrai o ID do usuário para saber de quem é a vez
             myUserId = extrairUserIdDoToken(token);
 
-            socket = io('https://api-liars.onrender.com', {
+            socket = io('https://api-liars.onrender.com', { // Ajuste para sua URL do backend
                 auth: { token: token }
             });
 
             socket.on('connect', () => log('✅ Conectado ao Servidor Socket!'));
             
+            // 👇 NOVO: Escuta o andamento da fila
+            socket.on('queue_update', (data) => {
+                log('⏳ Fila atualizada:', data.message);
+                document.getElementById('queueText').innerText = `Buscando... ${data.message}`;
+            });
+
+            // 👇 NOVO: Trava de anti-clone (caso ele tente puxar fila estando vivo numa sala)
+            socket.on('force_reconnect', (data) => {
+                log('⛔ Você já tem uma mesa ativa! Sendo jogado de volta...', data);
+                document.getElementById('matchId').value = data.matchId;
+                document.getElementById('queueText').innerText = "Reconectado à mesa antiga!";
+                setTimeout(() => socket.emit('reconnect_match'), 500);
+            });
+
             socket.on('game_ready', (data) => {
                 log('🎮 PARTIDA COMEÇOU!', data.message);
                 document.getElementById('matchId').value = data.matchId;
+                document.getElementById('queueText').innerText = "Na mesa!";
                 setTimeout(() => socket.emit('reconnect_match'), 500);
             });
 
@@ -193,12 +218,11 @@
             });
 
             socket.on('new_round_cards', (data) => {
-                log('🔄 NOVA RODADA: Cartas redistribuídas!', data.myCards);
+                log('🔄 NOVA RODADA!', data.myCards);
                 myCards = data.myCards || [];
                 renderHand();
             });
             
-            // Lógica visual do turno
             socket.on('turn_start', (data) => {
                 log(`⏱️ TURNO DE: ${data.currentPlayerNickname} | PEDE: ${data.roundCard}`);
                 atualizarTurnoUI(data.currentPlayerId, data.currentPlayerNickname, data.roundCard);
@@ -211,33 +235,43 @@
                 travarBotoes(true);
             });
             
-            socket.on('start_penalty_duel', (data) => log('💀 DUELO DA MORTE INICIADO PARA:', data.loserId));
+            socket.on('start_penalty_duel', (data) => log('💀 DUELO INICIADO PARA:', data.loserId));
             
-            // Lógica de resultado e eliminação local
             socket.on('penalty_result', (data) => {
                 log('🎲 RESULTADO PUNIÇÃO:', data.message);
-                
-                // Se for este usuário e ele tiver sido eliminado
                 if (data.userId === myUserId && data.isEliminated) {
-                    alert("💀 VOCÊ FOI ELIMINADO! Retornando ao menu...");
-                    
-                    // Limpa a tela localmente para simular o 'kick' do servidor
-                    document.getElementById('matchId').value = '';
-                    const banner = document.getElementById('turnBanner');
-                    banner.innerText = "Você foi desconectado da mesa.";
-                    banner.style.background = "#e74c3c";
-                    banner.style.color = "#fff";
-                    
-                    myCards = [];
-                    renderHand();
-                    travarBotoes(true);
+                    processarMorte("💀 VOCÊ FOI ELIMINADO!");
                 }
             });
             
             socket.on('game_over', (data) => log('🏆 FIM DE JOGO:', data.message));
+
+            // 👇 NOVO: Tratar eventos de desistência e eliminação por tempo
+            socket.on('player_surrendered', (data) => log('🏳️ ALGUÉM ARREGOU:', data.message));
+            socket.on('player_eliminated_afk', (data) => {
+                log('⌛ AFK ELIMINADO:', data.message);
+                if (data.userId === myUserId) {
+                    processarMorte("⌛ Tempo esgotado! Você foi eliminado.");
+                }
+            });
         }
 
-        // --- ATUALIZA A TELA DEPENDENDO DE QUEM É A VEZ ---
+        // --- Função para limpar a UI quando o jogador morre ou quita ---
+        function processarMorte(mensagem) {
+            alert(mensagem);
+            document.getElementById('matchId').value = '';
+            document.getElementById('queueText').innerText = "Fora da fila";
+            
+            const banner = document.getElementById('turnBanner');
+            banner.innerText = mensagem;
+            banner.style.background = "#e74c3c";
+            banner.style.color = "#fff";
+            
+            myCards = [];
+            renderHand();
+            travarBotoes(true);
+        }
+
         function atualizarTurnoUI(turnId, turnNickname, roundCard) {
             const banner = document.getElementById('turnBanner');
             isMyTurn = (turnId === myUserId);
@@ -253,7 +287,7 @@
                 banner.style.color = '#fff';
                 travarBotoes(true);
             }
-            renderHand(); // Re-renderiza para ativar/desativar as checkboxes
+            renderHand(); 
         }
 
         function travarBotoes(travar) {
@@ -261,7 +295,21 @@
             document.getElementById('btnDuvidar').disabled = travar;
         }
 
-        function buscarPartida() { socket.emit('find_match'); }
+        function buscarPartida() { 
+            document.getElementById('queueText').innerText = "Conectando na fila...";
+            socket.emit('find_match'); 
+        }
+        
+        // 👇 NOVO: Função que emite a Desistência
+        function desistir() {
+            const matchId = document.getElementById('matchId').value;
+            if (!matchId) return alert("Você não está em uma partida!");
+            
+            if (confirm("Tem certeza que deseja abandonar a mesa? Você será eliminado!")) {
+                socket.emit('surrender', { matchId: matchId, userId: myUserId });
+                processarMorte("🏳️ Você abandonou a partida.");
+            }
+        }
         
         function jogarCarta() {
             if(!isMyTurn) return;
@@ -276,7 +324,7 @@
             socket.emit('play_card', { matchId: matchId, cardsPlayed: cardsArray });
             
             indexesToRemove.sort((a, b) => b - a).forEach(idx => myCards.splice(idx, 1));
-            travarBotoes(true); // Trava instantaneamente pra não clicar 2x
+            travarBotoes(true); 
             renderHand(); 
         }
 

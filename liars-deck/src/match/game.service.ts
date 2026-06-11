@@ -2,31 +2,31 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service'; 
 import { Server, Socket } from 'socket.io';
 
-// 1. Definimos o que fica salvo na RAM do servidor
+// 1. Definição do estado da partida guardado na RAM do servidor
 interface GameState {
   playerIds: string[];
-  playerNicknames: Record<string, string>;
+  playerNicknames: Record<string, string>; // Dicionário (userId -> nickname)
+  playerAvatars: Record<string, string>;   // 👇 NOVO: Dicionário (userId -> avatarIndex/Path)
   currentTurnIndex: number;
   isPenaltyMode?: boolean;
-  roundCard: string;
-  cardsOnTableCount: number;
+  roundCard: string; 
+  cardsOnTableCount: number; 
   lastPlay?: {
     userId: string;
-    cardsPlayed: string[];
+    cardsPlayed: string[]; 
   };
 }
 
 @Injectable()
 export class GameService {
-  // 2. Os Maps que seguram a partida e os cronômetros na memória
+  // Maps para gerenciar o estado das salas e os cronómetros em tempo real (RAM)
   private activeGames: Map<string, GameState> = new Map();
   private disconnectTimeouts: Map<string, NodeJS.Timeout> = new Map();
-  // 👇 NOVO: Relógio da morte de 1 minuto para inatividade
-  private turnTimeouts: Map<string, NodeJS.Timeout> = new Map(); 
+  private turnTimeouts: Map<string, NodeJS.Timeout> = new Map(); // 👇 Cronómetro de inatividade de 1 min
 
   constructor(private prisma: PrismaService) {}
 
-  // --- Função Auxiliar: Desarma a bomba de 1 minuto ---
+  // --- Função Auxiliar: Desarma o cronómetro de turno de uma sala ---
   private clearTurnTimeout(matchId: string) {
     if (this.turnTimeouts.has(matchId)) {
       clearTimeout(this.turnTimeouts.get(matchId));
@@ -34,21 +34,27 @@ export class GameService {
     }
   }
 
+  // --- Inicialização e Distribuição de Cartas ---
   async initializeGame(matchId: string, playerIds: string[], server: Server) {
     console.log(`[Game] 🃏 Iniciando distribuição para a partida ${matchId}`);
 
+    // Puxa os dados de todos os jogadores do banco de dados de uma só vez
     const users = await this.prisma.user.findMany({
       where: { id: { in: playerIds } }
     });
     
     const playerNicknames: Record<string, string> = {};
+    const playerAvatars: Record<string, string> = {}; // 👇 NOVO: Dicionário local
+
     for (const u of users) {
       playerNicknames[u.id] = u['nickname'] || u['name'] || 'Jogador';
+      playerAvatars[u.id] = u['avatar'] || '1'; // 👇 NOVO: Captura o avatar (padrão '1' se nulo)
     }
 
     const deck = this.generateDeck();
     const shuffledDeck = this.shuffle(deck);
 
+    // Distribui 13 cartas para cada um dos 4 jogadores
     for (let i = 0; i < playerIds.length; i++) {
       const userId = playerIds[i];
       const hand = shuffledDeck.slice(i * 13, (i + 1) * 13);
@@ -59,6 +65,7 @@ export class GameService {
           data: { cards: hand }
         });
 
+        // Envia a mão privada de forma segura para cada socket individual
         server.to(userId).emit('your_hand', { cards: hand });
       } catch (error) {
         console.error(`[Game] ❌ Erro ao salvar a mão:`, error.message);
@@ -68,24 +75,36 @@ export class GameService {
     const validCards = ['ROCK', 'PAPER', 'SCISSORS'];
     const initialRoundCard = validCards[Math.floor(Math.random() * validCards.length)];
 
+    // 👇 NOVO: Monta a estrutura com ID, Nick e Avatar para enviar ao Frontend
+    const playersInfo = playerIds.map(id => ({
+      userId: id,
+      nickname: playerNicknames[id],
+      avatar: playerAvatars[id]
+    }));
+
+    // Avisa a sala inteira que o jogo começou e envia as informações estéticas dos perfis
     server.to(matchId).emit('game_ready', { 
       message: 'As cartas foram distribuídas! O duelo começou.',
-      matchId: matchId
+      matchId: matchId,
+      playersInfo: playersInfo // 👇 Dados enviados aqui!
     });
 
+    // Salva o estado inicial na memória RAM do servidor
     this.activeGames.set(matchId, {
       playerIds: playerIds,
       playerNicknames: playerNicknames,
+      playerAvatars: playerAvatars, // 👇 Registado em RAM
       currentTurnIndex: 0, 
       isPenaltyMode: false,
       roundCard: initialRoundCard,
       cardsOnTableCount: 0
     });
 
+    // Inicia o primeiro turno da partida
     this.emitTurn(matchId, server);
   }
 
-  // --- Função para emitir de quem é a vez ---
+  // --- Emissão de Turno com Inicialização do Cronómetro ---
   private emitTurn(matchId: string, server: Server) {
     const game = this.activeGames.get(matchId);
     if (!game) return;
@@ -93,54 +112,55 @@ export class GameService {
     const currentPlayerId = game.playerIds[game.currentTurnIndex];
     const currentPlayerNickname = game.playerNicknames[currentPlayerId] || currentPlayerId;
 
-    console.log(`[Game] ⏳ Turno de ${currentPlayerNickname} (${currentPlayerId}) | Carta: ${game.roundCard}`);
+    console.log(`[Game] ⏳ Turno de ${currentPlayerNickname} (${currentPlayerId}) | Carta Pediada: ${game.roundCard}`);
 
     server.to(matchId).emit('turn_start', {
       currentPlayerId: currentPlayerId,
-      currentPlayerNickname: currentPlayerNickname,
+      currentPlayerNickname: currentPlayerNickname, 
       roundCard: game.roundCard,
       cardsOnTableCount: game.cardsOnTableCount,
       message: `É a vez de ${currentPlayerNickname}!`
     });
 
-    // 👇 NOVO: Limpa o timer velho e inicia a contagem de 60 segundos
+    // 👇 NOVO: Limpa o temporizador antigo e arma a bomba de inatividade de 1 minuto
     this.clearTurnTimeout(matchId);
     const timeout = setTimeout(() => {
       this.handleTurnTimeout(matchId, currentPlayerId, server);
-    }, 60000); // 60 segundos = 1 minuto
+    }, 60000); // 60.000 milissegundos = 1 minuto
 
     this.turnTimeouts.set(matchId, timeout);
   }
 
-  // --- 👇 NOVO: Função que elimina o jogador afk e reinicia a rodada ---
+  // --- 👇 NOVO: Guilhotina de Inatividade (Executada após 1 minuto sem jogar) ---
   async handleTurnTimeout(matchId: string, afkPlayerId: string, server: Server) {
     const game = this.activeGames.get(matchId);
     if (!game) return;
 
-    // Se a partida mudou de vez muito rápido, aborta pra não bugar
+    // Proteção: Garante que o jogador de facto ainda é o dono do turno atual
     if (game.playerIds[game.currentTurnIndex] !== afkPlayerId) return;
 
     this.clearTurnTimeout(matchId);
     const playerNick = game.playerNicknames[afkPlayerId] || 'Um jogador';
     
-    console.log(`[TIMEOUT] ⏳ 1 minuto esgotado! ${playerNick} será eliminado da sala ${matchId}`);
+    console.log(`[TIMEOUT] ⏳ 1 minuto esgotado para o jogador ${playerNick} na sala ${matchId}`);
 
-    // Elimina no banco de dados
+    // 1. Atualiza o status dele para ELIMINATED no banco de dados
     await this.prisma.matchPlayer.updateMany({
       where: { matchId: matchId, userId: afkPlayerId },
       data: { status: 'ELIMINATED' },
     });
 
+    // 2. Notifica a sala sobre a eliminação por AFK
     server.to(matchId).emit('player_eliminated_afk', {
       userId: afkPlayerId,
-      message: `💀 ${playerNick} demorou 1 minuto e foi ELIMINADO por inatividade! Iniciando nova rodada...`
+      message: `💀 ${playerNick} demorou mais de 1 minuto para jogar e foi ELIMINADO por inatividade!`
     });
 
-    // Aproveitamos a sua função que já sabe como limpar a mesa e iniciar nova rodada (ou finalizar se só sobrar 1)
+    // 3. Deixa a sua função principal avaliar se o jogo acabou ou se deve reiniciar a rodada
     await this.checkGameOverOrContinue(matchId, server);
   }
 
-  // --- Função para passar a vez ---
+  // --- Passagem de Turno Regular ---
   passTurn(matchId: string, server: Server) {
     const game = this.activeGames.get(matchId);
     if (!game || game.playerIds.length === 0) return; 
@@ -151,9 +171,9 @@ export class GameService {
     this.emitTurn(matchId, server);
   }
 
-  // --- Função para processar a jogada de múltiplas cartas ---
+  // --- Processamento de Jogada (Cartas na Mesa) ---
   async processMove(matchId: string, userId: string, cardsPlayed: string[], server: Server) {
-    // 👇 NOVO: O jogador agiu, desarma a bomba!
+    // 👇 NOVO: O jogador agiu a tempo! Desarma o cronómetro imediatamente.
     this.clearTurnTimeout(matchId);
 
     const game = this.activeGames.get(matchId);
@@ -215,7 +235,7 @@ export class GameService {
     return { success: true };
   }
 
-  // --- Função Auxiliar: Punição por não duvidar ---
+  // --- Punição por não duvidar quando o oponente zera a mão ---
   private async forceLoseForNotChallenging(matchId: string, loserId: string, winnerId: string, server: Server) {
     const game = this.activeGames.get(matchId);
     if (!game) return { success: false };
@@ -237,9 +257,9 @@ export class GameService {
     return { success: true };
   }
 
-  // --- Função do Desafio (DUVIDAR / MENTIRA) ---
+  // --- Processamento de Desafio (DUVIDAR) ---
   async challengeMove(matchId: string, challengerId: string, server: Server) {
-    // 👇 NOVO: O jogador agiu, desarma a bomba!
+    // 👇 NOVO: O desafiante agiu! Desarma o cronómetro.
     this.clearTurnTimeout(matchId);
 
     const game = this.activeGames.get(matchId);
@@ -284,7 +304,7 @@ export class GameService {
     return { success: true };
   }
 
-  // --- Resolução do Jokenpô (Punição) ---
+  // --- Resolução do Duelo de Jokenpô (Punição) ---
   async resolvePenaltyDuel(matchId: string, userId: string, playerChoice: string, server: Server) {
     const validChoices = ['ROCK', 'PAPER', 'SCISSORS'];
     if (!validChoices.includes(playerChoice)) {
@@ -356,14 +376,14 @@ export class GameService {
     return { success: true };
   }
 
-  // --- Verifica Fim de Jogo ou Continua (Nova Rodada) ---
+  // --- Verificação de Fim de Jogo ou Continuação da Próxima Rodada ---
   private async checkGameOverOrContinue(matchId: string, server: Server) {
     const survivors = await this.prisma.matchPlayer.findMany({
       where: { matchId, status: { not: 'ELIMINATED' } }
     });
 
     if (survivors.length <= 1) {
-      this.clearTurnTimeout(matchId); // Garante que a bomba não exploda depois de acabar
+      this.clearTurnTimeout(matchId); // Para o relógio se a partida acabar
       
       const winnerId = survivors.length === 1 ? survivors[0].userId : null;
       
@@ -397,7 +417,7 @@ export class GameService {
 
       this.activeGames.delete(matchId);
     } else { 
-      // O JOGO CONTINUA - NOVA RODADA
+      // O JOGO CONTINUA - NOVA RODADA COMPLETA
       await this.prisma.match.update({ where: { id: matchId }, data: { status: 'PLAYING' } });
 
       const game = this.activeGames.get(matchId);
@@ -409,6 +429,7 @@ export class GameService {
         const validCards = ['ROCK', 'PAPER', 'SCISSORS'];
         game.roundCard = validCards[Math.floor(Math.random() * validCards.length)];
         
+        // Remove quem morreu da lista ativa na RAM
         const survivorIds = survivors.map(s => s.userId);
         game.playerIds = game.playerIds.filter(id => survivorIds.includes(id));
         
@@ -416,6 +437,7 @@ export class GameService {
             game.currentTurnIndex = 0; 
         }
 
+        // Gera e redistribui novo baralho limpo de 13 cartas para os sobreviventes
         const deck = this.generateDeck();
         const shuffledDeck = this.shuffle(deck);
 
@@ -434,7 +456,7 @@ export class GameService {
           });
         }
 
-        // Passa o turno para o próximo vivo e chama o emitTurn (que vai disparar a contagem de 1 min de novo)
+        // Passa a vez e dispara o emitTurn (que ativa o novo temporizador de 1 minuto)
         game.currentTurnIndex = (game.currentTurnIndex + 1) % game.playerIds.length;
         
         this.activeGames.set(matchId, game);
@@ -442,46 +464,63 @@ export class GameService {
       }
     }
   }
-  
-  // --- Geração do Baralho ---
-  private generateDeck(): string[] {
-    const deck: string[] = [];
-    for (let i = 0; i < 16; i++) {
-      deck.push('ROCK', 'PAPER', 'SCISSORS');
+
+  // --- 👇 NOVO: Sistema de Desistência Instantânea (Quit/Surrender) ---
+  async surrenderMatch(matchId: string, userId: string, server: Server) {
+    const game = this.activeGames.get(matchId);
+    if (!game) return;
+
+    const playerNick = game.playerNicknames[userId] || 'Um jogador';
+    console.log(`[Quit] 🏳️ ${playerNick} abandonou voluntariamente a partida ${matchId}.`);
+
+    // 1. Desarma imediatamente os cronómetros dele (AFK de queda de net e de turno)
+    if (this.disconnectTimeouts.has(userId)) {
+      clearTimeout(this.disconnectTimeouts.get(userId));
+      this.disconnectTimeouts.delete(userId);
     }
-    deck.push('JOKER', 'JOKER', 'JOKER', 'JOKER');
-    return deck;
+    if (game.playerIds[game.currentTurnIndex] === userId) {
+        this.clearTurnTimeout(matchId);
+    }
+
+    // 2. Executa a morte no banco instantaneamente
+    await this.prisma.matchPlayer.updateMany({
+      where: { matchId: matchId, userId: userId },
+      data: { status: 'ELIMINATED' }
+    });
+
+    // 3. Alerta a mesa do abandono
+    server.to(matchId).emit('player_surrendered', {
+      userId: userId,
+      message: `🏳️ ${playerNick} capitulou e abandonou a partida!`
+    });
+
+    // 4. Ejeta o socket da sala do Socket.io
+    server.in(userId).socketsLeave(matchId);
+
+    // 5. Avalia o encerramento do jogo
+    await this.checkGameOverOrContinue(matchId, server);
   }
 
-  // --- Embaralhamento ---
-  private shuffle(array: string[]): string[] {
-    const newArray = [...array];
-    for (let i = newArray.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
-    }
-    return newArray;
-  }
-
-  // --- Recuperar a partida ---
+  // --- Recuperação de Estado Avançada (Reconexões) ---
   async recoverGameState(userId: string, client: Socket) {
     if (this.disconnectTimeouts.has(userId)) {
       clearTimeout(this.disconnectTimeouts.get(userId));
       this.disconnectTimeouts.delete(userId);
-      console.log(`[AFK] 🛑 Eliminação cancelada! Jogador ${userId} reconectou a tempo.`);
+      console.log(`[AFK] 🛑 Eliminação revogada! Jogador ${userId} reconectou.`);
     }
 
+    // 👇 TRAVA ANTI-LIMBO ATIVADA: Ignora se o jogador já estiver como ELIMINATED no banco
     const playerRecord = await this.prisma.matchPlayer.findFirst({
       where: { 
         userId: userId, 
         match: { status: { in: ['PLAYING', 'PENALTY'] } },
-        status: { not: 'ELIMINATED' } // 👇 CORREÇÃO: Impede sala zumbi pra quem já perdeu!
+        status: { not: 'ELIMINATED' } 
       },
       include: { match: true }
     });
 
     if (!playerRecord) {
-      return { success: false, message: 'Nenhuma partida ativa encontrada.' };
+      return { success: false, message: 'Nenhuma partida ativa encontrada para este perfil.' };
     }
 
     const matchId = playerRecord.matchId;
@@ -489,13 +528,20 @@ export class GameService {
 
     if (!game) {
       await this.prisma.match.update({ where: { id: matchId }, data: { status: 'FINISHED' } });
-      return { success: false, message: 'Partida expirou no servidor.' };
+      return { success: false, message: 'A mesa expirou na RAM do servidor.' };
     }
 
     client.join(matchId);
     client.join(userId);
 
     const currentPlayerId = game.playerIds[game.currentTurnIndex];
+
+    // 👇 NOVO: Remonta e envia a lista de quem ainda está jogando e suas fotos de perfil
+    const playersInfo = game.playerIds.map(id => ({
+      userId: id,
+      nickname: game.playerNicknames[id],
+      avatar: game.playerAvatars[id]
+    }));
 
     const state = {
       matchId: matchId,
@@ -506,6 +552,7 @@ export class GameService {
       currentTurnPlayerNickname: game.playerNicknames[currentPlayerId],
       roundCard: game.roundCard, 
       cardsOnTableCount: game.cardsOnTableCount,
+      playersInfo: playersInfo, // 👇 Reenviando a lista na reconexão
       lastPlay: game.lastPlay ? {
         userId: game.lastPlay.userId,
         count: game.lastPlay.cardsPlayed.length 
@@ -513,12 +560,12 @@ export class GameService {
     };
 
     client.emit('game_state_recovered', state);
-    console.log(`[Reconexão] Jogador ${userId} voltou para a partida ${matchId}`);
+    console.log(`[Reconexão] Jogador ${userId} recuperou o assento na partida ${matchId}`);
 
     return { success: true };
   }
 
-  // --- Lidar com desconexões prolongadas ---
+  // --- Gerenciamento de Quedas Involuntárias (Internet/App Fechado sem Desistir) ---
   async handlePlayerDisconnect(userId: string, server: Server) {
     const player = await this.prisma.matchPlayer.findFirst({
       where: { 
@@ -534,7 +581,7 @@ export class GameService {
     const game = this.activeGames.get(matchId);
     const playerNick = game?.playerNicknames[userId] || 'Um jogador';
 
-    console.log(`[AFK] ⚠️ ${playerNick} caiu na partida ${matchId}. Iniciando timer de 30s...`);
+    console.log(`[AFK] ⚠️ ${playerNick} perdeu a ligação com a partida ${matchId}. Aguardando 30s de tolerância...`);
     
     server.to(matchId).emit('player_disconnected', {
       userId,
@@ -542,7 +589,7 @@ export class GameService {
     });
 
     const timeout = setTimeout(async () => {
-      console.log(`[AFK] 💀 Tempo esgotado para ${playerNick}. Aplicando W.O.`);
+      console.log(`[AFK] 💀 W.O. aplicado! Tempo esgotado para o jogador ${playerNick}.`);
 
       await this.prisma.matchPlayer.updateMany({
         where: { matchId: matchId, userId: userId },
@@ -551,51 +598,32 @@ export class GameService {
 
       server.to(matchId).emit('player_eliminated_afk', {
         userId,
-        message: `${playerNick} foi eliminado por abandono de partida!`
+        message: `💀 ${playerNick} foi eliminado por abandono involuntário de partida!`
       });
 
       this.disconnectTimeouts.delete(userId);
       await this.checkGameOverOrContinue(matchId, server);
-    }, 30000);
+    }, 30000); // 30 segundos para reconectar
 
     this.disconnectTimeouts.set(userId, timeout);
   }
 
-
-  async surrenderMatch(matchId: string, userId: string, server: Server) {
-    const game = this.activeGames.get(matchId);
-    if (!game) return;
-
-    const playerNick = game.playerNicknames[userId] || 'Um jogador';
-    console.log(`[Quit] 🏳️ ${playerNick} abandonou a partida ${matchId} voluntariamente.`);
-
-    // 1. Limpa os temporizadores (Desarma a bomba de AFK e de turno dele)
-    if (this.disconnectTimeouts.has(userId)) {
-      clearTimeout(this.disconnectTimeouts.get(userId));
-      this.disconnectTimeouts.delete(userId);
+  // --- Algoritmos Internos do Deck ---
+  private generateDeck(): string[] {
+    const deck: string[] = [];
+    for (let i = 0; i < 16; i++) {
+      deck.push('ROCK', 'PAPER', 'SCISSORS');
     }
-    
-    // Se era o turno dele, limpa o timer de 1 minuto
-    if (game.playerIds[game.currentTurnIndex] === userId) {
-        this.clearTurnTimeout(matchId);
+    deck.push('JOKER', 'JOKER', 'JOKER', 'JOKER');
+    return deck;
+  }
+
+  private shuffle(array: string[]): string[] {
+    const newArray = [...array];
+    for (let i = newArray.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
     }
-
-    // 2. Atualiza o banco para ELIMINATED instantaneamente
-    await this.prisma.matchPlayer.updateMany({
-      where: { matchId: matchId, userId: userId },
-      data: { status: 'ELIMINATED' }
-    });
-
-    // 3. Avisa a mesa do abandono
-    server.to(matchId).emit('player_surrendered', {
-      userId: userId,
-      message: `🏳️ ${playerNick} arregou e abandonou a partida!`
-    });
-
-    // 4. Força a saída do socket da sala (se ele ainda estiver conectado por algum bug)
-    server.in(userId).socketsLeave(matchId);
-
-    // 5. Aciona o fim de jogo ou a passagem de turno limpa
-    await this.checkGameOverOrContinue(matchId, server);
+    return newArray;
   }
 }

@@ -23,7 +23,7 @@ model User {
 
   wins          Int @default(0)
   matchesPlayed Int @default(0)
-
+  coins         Int @default(100)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

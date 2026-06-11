@@ -31,6 +31,20 @@ export class GameService {
     }
   }
 
+  // 👇 NOVA FUNÇÃO: Limpa TODOS os timers de uma partida
+  private clearAllMatchTimeouts(matchId: string, playerIds: string[]) {
+    // 1. Limpa o timer do turno (60s)
+    this.clearTurnTimeout(matchId);
+
+    // 2. Limpa os timers de desconexão (30s) de todos os jogadores daquela mesa
+    for (const id of playerIds) {
+      if (this.disconnectTimeouts.has(id)) {
+        clearTimeout(this.disconnectTimeouts.get(id));
+        this.disconnectTimeouts.delete(id);
+      }
+    }
+  }
+
   async initializeGame(matchId: string, playerIds: string[], server: Server) {
     console.log(`[Game] 🃏 Iniciando distribuição para a partida ${matchId}`);
 
@@ -68,16 +82,25 @@ export class GameService {
     const validCards = ['ROCK', 'PAPER', 'SCISSORS'];
     const initialRoundCard = validCards[Math.floor(Math.random() * validCards.length)];
 
+    // 👇 CORREÇÃO: Enviando o formato de payload esperado pelo seu cliente Flutter novo
     const playersInfo = playerIds.map(id => ({
-      userId: id,
+      id: id, // Usando 'id' conforme seu novo Flutter espera
       nickname: playerNicknames[id],
-      avatar: playerAvatars[id]
+      avatar: playerAvatars[id],
+      cardsCount: 13,
+      isAlive: true
     }));
 
     server.to(matchId).emit('game_ready', { 
       message: 'As cartas foram distribuídas! O duelo começou.',
       matchId: matchId,
       playersInfo: playersInfo
+    });
+
+    // Enviar o match_started também para garantir
+    server.to(matchId).emit('match_started', {
+      playersInfo: playersInfo,
+      currentTurnPlayerId: playerIds[0] // Define provisoriamente o primeiro jogador
     });
 
     this.activeGames.set(matchId, {
@@ -120,7 +143,7 @@ export class GameService {
 
   async handleTurnTimeout(matchId: string, afkPlayerId: string, server: Server) {
     const game = this.activeGames.get(matchId);
-    if (!game) return;
+    if (!game) return; // Trava contra partidas fantasmas
 
     if (game.playerIds[game.currentTurnIndex] !== afkPlayerId) return;
 
@@ -355,6 +378,9 @@ export class GameService {
 
   // --- 👇 ATUALIZADO: Verificação de Fim de Jogo e Distribuição de Moedas ---
   private async checkGameOverOrContinue(matchId: string, server: Server, newlyEliminatedId?: string) {
+    const game = this.activeGames.get(matchId);
+    if (!game) return; // Trava de segurança: Se o jogo não existe na memória, ignora (evita loops)
+
     const survivors = await this.prisma.matchPlayer.findMany({
       where: { matchId, status: { not: 'ELIMINATED' } }
     });
@@ -385,7 +411,8 @@ export class GameService {
     // ==========================================
 
     if (survivors.length <= 1) {
-      this.clearTurnTimeout(matchId); 
+      // 👇 IMPLEMENTADO: Limpeza total de timers
+      this.clearAllMatchTimeouts(matchId, game.playerIds);
       
       const winnerId = survivors.length === 1 ? survivors[0].userId : null;
       
@@ -418,20 +445,20 @@ export class GameService {
         });
       }
 
-      const game = this.activeGames.get(matchId);
-      const winnerNick = winnerId && game ? game.playerNicknames[winnerId] : null;
+      const winnerNick = winnerId ? game.playerNicknames[winnerId] : null;
 
       server.to(matchId).emit('game_over', { 
         winnerId: winnerId, 
         message: winnerId ? `🏆 ${winnerNick} é o grande campeão!` : '🤝 Empate/Todos eliminados.' 
       });
 
+      // 👇 IMPLEMENTADO: Apaga a partida da RAM para impedir partidas fantasmas
       this.activeGames.delete(matchId);
+      console.log(`[Game] 🧹 Mesa ${matchId} limpa e encerrada.`);
     } else { 
       // O JOGO CONTINUA - NOVA RODADA COMPLETA
       await this.prisma.match.update({ where: { id: matchId }, data: { status: 'PLAYING' } });
 
-      const game = this.activeGames.get(matchId);
       if (game) {
         game.isPenaltyMode = false; 
         game.lastPlay = undefined;
@@ -450,6 +477,15 @@ export class GameService {
         const deck = this.generateDeck();
         const shuffledDeck = this.shuffle(deck);
 
+        // Prepara os dados atualizados dos jogadores para mandar no novo round
+        const playersInfo = game.playerIds.map(id => ({
+          id: id,
+          nickname: game.playerNicknames[id],
+          avatar: game.playerAvatars[id],
+          cardsCount: 13,
+          isAlive: true
+        }));
+
         for (let i = 0; i < survivors.length; i++) {
           const survivorId = survivors[i].userId;
           const hand = shuffledDeck.slice(i * 13, (i + 1) * 13);
@@ -461,7 +497,7 @@ export class GameService {
 
           server.to(survivorId).emit('new_round_cards', { 
             myCards: hand,
-            opponentCardsLeft: 13 
+            playersInfo: playersInfo // Mandando as informações da mesa atualizadas
           });
         }
 
@@ -538,9 +574,11 @@ export class GameService {
     const currentPlayerId = game.playerIds[game.currentTurnIndex];
 
     const playersInfo = game.playerIds.map(id => ({
-      userId: id,
+      id: id,
       nickname: game.playerNicknames[id],
-      avatar: game.playerAvatars[id]
+      avatar: game.playerAvatars[id],
+      cardsCount: 13, // Isso pode ser dinâmico buscando no banco depois, mas para iniciar o round serve
+      isAlive: true
     }));
 
     const state = {
@@ -588,6 +626,10 @@ export class GameService {
     });
 
     const timeout = setTimeout(async () => {
+      // Trava de segurança no timer
+      const currentGameState = this.activeGames.get(matchId);
+      if (!currentGameState) return;
+
       console.log(`[AFK] 💀 W.O. aplicado! Tempo esgotado para o jogador ${playerNick}.`);
 
       await this.prisma.matchPlayer.updateMany({

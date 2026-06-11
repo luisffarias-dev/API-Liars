@@ -5,7 +5,6 @@ import { PrismaService } from '../prisma/prisma.service';
 export class UserService {
   constructor(private prisma: PrismaService) {}
 
-  
   async getProfile(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -13,6 +12,7 @@ export class UserService {
         id: true,
         nickname: true,
         avatar: true,
+        coins: true,
         wins: true,
         matchesPlayed: true,
         createdAt: true,
@@ -29,18 +29,22 @@ export class UserService {
     return {
       ...user,
       losses,
-      winRate, // Retorna como número pura (ex: 75), ideal para o Flutter tratar
+      winRate, // Retorna como número puro (ex: 75), ideal para o Flutter tratar
     };
   }
 
-  // Lógica do Ranking (Trazida da sua antiga controller)
+  // ==========================================
+  // 🏆 RANKING 1: Top Vencedores (Por Vitórias)
+  // ==========================================
   async getRanking() {
     const topPlayers = await this.prisma.user.findMany({
       orderBy: { wins: 'desc' },
       take: 10,
       select: {
         nickname: true,
+        avatar: true, // Adicionado para a UI do Flutter ficar completa!
         wins: true,
+        coins: true,
         matchesPlayed: true,
       }
     });
@@ -53,7 +57,29 @@ export class UserService {
     }));
   }
 
+  // ==========================================
+  // 💰 RANKING 2: Mais Ricos (Por Moedas)
+  // ==========================================
+  async getRankingByCoins() {
+    const richestPlayers = await this.prisma.user.findMany({
+      orderBy: { coins: 'desc' }, // A MÁGICA AQUI: Ordena pela fortuna
+      take: 10,
+      select: {
+        nickname: true,
+        avatar: true,
+        coins: true, // O destaque principal desta lista
+        wins: true,
+        matchesPlayed: true,
+      }
+    });
 
+    return richestPlayers.map(player => ({
+      ...player,
+      winRate: player.matchesPlayed > 0 
+        ? ((player.wins / player.matchesPlayed) * 100).toFixed(1) + '%' 
+        : '0%'
+    }));
+  }
 
   async updateAvatar(userId: string, avatarName: string) {
     const updatedUser = await this.prisma.user.update({

@@ -59,4 +59,9 @@ export class UserController {
 
     return this.userService.updateAvatar(userId, updateAvatarDto.avatar);
   }
+
+  @Get('ranking/coins')
+  async getCoinRanking() {
+    return this.userService.getRankingByCoins();
+  }
 }

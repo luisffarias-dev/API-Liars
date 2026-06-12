@@ -7,16 +7,15 @@ import {
   ConnectedSocket, 
   MessageBody
 } from '@nestjs/websockets';
-import { UsePipes, ValidationPipe } from '@nestjs/common'; // 👇 Import necessário
+import { UsePipes, ValidationPipe } from '@nestjs/common'; 
 import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { MatchmakingService } from '../matchmaking/matchmaking.service';
 import { GameService } from '../game.service'; 
-import { PlayCardDto } from '../dto/play-card.dto'; // 👇 DTO criado antes
-import { ChallengeDto } from '../dto/challenge.dto'; // 👇 Novo DTO
+import { PlayCardDto } from '../dto/play-card.dto'; 
+import { ChallengeDto } from '../dto/challenge.dto'; 
 
 @WebSocketGateway({ cors: { origin: '*' } })
-// 👇 Ativa a validação para todos os métodos que usarem @UsePipes
 export class MatchGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() server: Server;
 
@@ -89,7 +88,7 @@ export class MatchGateway implements OnGatewayConnection, OnGatewayDisconnect {
     );
 
     if (!result.success) {
-      client.emit('error', { message: result.message });
+      client.emit('error', { message: (result as any).message || 'Erro desconhecido' });
     }
   }
 
@@ -98,7 +97,6 @@ export class MatchGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { matchId: string; choice: string }
   ) {
-    // Nota: Se quiser ser 100% rigoroso, crie um PenaltyDto também
     const result = await this.gameService.resolvePenaltyDuel(
       data.matchId,
       client.data.userId,
@@ -107,8 +105,24 @@ export class MatchGateway implements OnGatewayConnection, OnGatewayDisconnect {
     );
 
     if (!result.success) {
-      client.emit('error', { message: result.message });
+      client.emit('error', { message: (result as any).message || 'Erro desconhecido' });
     }
+  }
+
+  // 👇 NOVA ROTA ADICIONADA: DESISTÊNCIA (SURRENDER) PROTEGIDA
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  @SubscribeMessage('surrender')
+  async handleSurrender(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: ChallengeDto // Reaproveitamos o ChallengeDto pois ele já valida o matchId!
+  ) {
+    console.log(`[Gateway] 🏳️ Jogador ${client.data.userId} solicitou desistência da partida ${data.matchId}.`);
+    
+    await this.gameService.surrenderMatch(
+      data.matchId,
+      client.data.userId,
+      this.server
+    );
   }
 
   @SubscribeMessage('reconnect_match')

@@ -531,7 +531,7 @@ export class GameService {
 
     server.to(matchId).emit('player_surrendered', {
       userId: userId,
-      message: `🏳️ ${playerNick} capitulou e abandonou a partida!`
+      message: `🏳️ ${playerNick} arregou e abandonou a partida!`
     });
 
     server.in(userId).socketsLeave(matchId);

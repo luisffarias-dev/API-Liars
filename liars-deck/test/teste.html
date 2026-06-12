@@ -134,7 +134,7 @@
             log(`⏳ Tentando fazer login com ${email}...`);
 
             try {
-                const response = await fetch('https://api-liars.onrender.com/auth/login', { // Ajuste para sua URL se não for localhost
+                const response = await fetch('https://api-liars.onrender.com/auth/login', { 
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ email, password })
@@ -180,19 +180,17 @@
 
             myUserId = extrairUserIdDoToken(token);
 
-            socket = io('https://api-liars.onrender.com', { // Ajuste para sua URL do backend
+            socket = io('https://api-liars.onrender.com', { 
                 auth: { token: token }
             });
 
             socket.on('connect', () => log('✅ Conectado ao Servidor Socket!'));
             
-            // 👇 NOVO: Escuta o andamento da fila
             socket.on('queue_update', (data) => {
                 log('⏳ Fila atualizada:', data.message);
                 document.getElementById('queueText').innerText = `Buscando... ${data.message}`;
             });
 
-            // 👇 NOVO: Trava de anti-clone (caso ele tente puxar fila estando vivo numa sala)
             socket.on('force_reconnect', (data) => {
                 log('⛔ Você já tem uma mesa ativa! Sendo jogado de volta...', data);
                 document.getElementById('matchId').value = data.matchId;
@@ -246,7 +244,6 @@
             
             socket.on('game_over', (data) => log('🏆 FIM DE JOGO:', data.message));
 
-            // 👇 NOVO: Tratar eventos de desistência e eliminação por tempo
             socket.on('player_surrendered', (data) => log('🏳️ ALGUÉM ARREGOU:', data.message));
             socket.on('player_eliminated_afk', (data) => {
                 log('⌛ AFK ELIMINADO:', data.message);
@@ -256,7 +253,6 @@
             });
         }
 
-        // --- Função para limpar a UI quando o jogador morre ou quita ---
         function processarMorte(mensagem) {
             alert(mensagem);
             document.getElementById('matchId').value = '';
@@ -300,12 +296,12 @@
             socket.emit('find_match'); 
         }
         
-        // 👇 NOVO: Função que emite a Desistência
         function desistir() {
             const matchId = document.getElementById('matchId').value;
             if (!matchId) return alert("Você não está em uma partida!");
             
             if (confirm("Tem certeza que deseja abandonar a mesa? Você será eliminado!")) {
+                // Seu código já tinha o userId aqui, mantive como estava.
                 socket.emit('surrender', { matchId: matchId, userId: myUserId });
                 processarMorte("🏳️ Você abandonou a partida.");
             }
@@ -321,7 +317,8 @@
             const cardsArray = Array.from(checkboxes).map(cb => cb.value);
             const indexesToRemove = Array.from(checkboxes).map(cb => parseInt(cb.getAttribute('data-index')));
 
-            socket.emit('play_card', { matchId: matchId, cardsPlayed: cardsArray });
+            // 👇 CORRIGIDO: Adicionado userId
+            socket.emit('play_card', { matchId: matchId, userId: myUserId, cardsPlayed: cardsArray });
             
             indexesToRemove.sort((a, b) => b - a).forEach(idx => myCards.splice(idx, 1));
             travarBotoes(true); 
@@ -330,13 +327,16 @@
 
         function duvidar() {
             if(!isMyTurn) return;
-            socket.emit('challenge', { matchId: document.getElementById('matchId').value });
+            // 👇 CORRIGIDO: Adicionado userId
+            socket.emit('challenge', { matchId: document.getElementById('matchId').value, userId: myUserId });
             travarBotoes(true);
         }
 
         function jogarPunicao(choice) {
+            // 👇 CORRIGIDO: Adicionado userId
             socket.emit('play_penalty', { 
                 matchId: document.getElementById('matchId').value,
+                userId: myUserId,
                 choice: choice
             });
         }

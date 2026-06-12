@@ -10,7 +10,7 @@ export class PlayCardDto {
   @IsArray({ message: 'cardsPlayed deve ser um array de cartas.' })
   @IsString({ each: true })
   @ArrayMinSize(1, { message: 'Tem de jogar pelo menos uma carta.' })
-  @ArrayMaxSize(5, { message: 'Não pode jogar mais de 5 cartas de uma vez.' })
+  @ArrayMaxSize(13, { message: 'Não pode jogar mais de 5 cartas de uma vez.' })
   @IsIn(['ROCK', 'PAPER', 'SCISSORS', 'JOKER'], { 
     each: true, 
     message: 'Carta inválida. Apenas ROCK, PAPER, SCISSORS ou JOKER são permitidos.' 
